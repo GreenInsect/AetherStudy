@@ -71,6 +71,8 @@ class ProfileAgent(BaseAgent):
             "learning_goals": [],
             "weak_points": [],
             "cognition_style": None,
+            "learning_pace": None,
+            "description": "用户对话中透露的个人信息总结"
         }
     
     async def generate(self, request: Dict[str, Any]) -> ResourceItem:

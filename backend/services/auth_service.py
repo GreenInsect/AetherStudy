@@ -25,8 +25,7 @@ from database.db import get_db
 from models.user import UserInDB
 
 # ─── 配置 ──────────────────────────────────────────────────────────────────
-# 生产环境务必通过环境变量设置 SECRET_KEY，不要使用默认值！
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "AetherStudy-dev-secret-key-change-in-production-2024")
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "AetherStudy-dev-secret-key-change-in-production-2026")
 ALGORITHM  = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "1440"))  # 默认 24 小时
 

@@ -34,6 +34,7 @@ class StudentProfile(BaseModel):
     major: Optional[str] = None           # 专业
     grade: Optional[str] = None           # 年级
     school: Optional[str] = None          # 学校
+    description: Optional[str] = None     # 个人简介
     
     # 维度2：知识基础
     knowledge_foundation: Dict[str, int] = Field(
@@ -53,7 +54,7 @@ class StudentProfile(BaseModel):
     error_prone_areas: Dict[str, List[str]] = Field(default_factory=dict)
     
     # 维度6：学习偏好
-    learning_pace: Optional[LearningPace] = None
+    learning_pace: Optional[str] = None
     preferred_resource_types: List[str] = Field(default_factory=list)  # video/doc/quiz/case
     study_time_per_day: Optional[int] = None  # 分钟
     

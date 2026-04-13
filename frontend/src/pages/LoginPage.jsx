@@ -1,12 +1,12 @@
 import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { Zap, Eye, EyeOff, LogIn, AlertCircle } from 'lucide-react'
-import { apiLogin } from '../api'
+import { apiLogin, getMyProfile, apiListSessions } from '../api'
 import { useAppStore } from '../store'
 
 export default function LoginPage() {
   const navigate = useNavigate()
-  const { setAuth } = useAppStore()
+  const { setAuth, setProfile, setSessions } = useAppStore()
 
   const [identifier, setIdentifier] = useState('')  // 用户名或邮箱
   const [password, setPassword] = useState('')
@@ -22,6 +22,31 @@ export default function LoginPage() {
     try {
       const data = await apiLogin(identifier.trim(), password)
       setAuth(data.access_token, data.user)
+
+      try {
+        const profileData = await getMyProfile()
+        if (profileData) {
+          setProfile(profileData.profile)
+          console.log('画像数据加载成功')
+          console.log('登录后获取画像数据:', profileData)  // 调试日志          
+        }else {
+          console.warn('画像数据加载失败，返回数据不正确:', profileData)
+          setProfile(null)  // 设置为 null 或默认值以避免后续错误
+        }
+        const data = await apiListSessions()
+        if(data && Array.isArray(data)){
+          setSessions(Array.isArray(data) ? data : [])        
+          console.log('[*] klog: 登录后加载会话列表成功 data: ', data)
+        } else {
+          console.warn('[*] klog: 登录后加载会话列表失败，返回数据格式不正确: ', data)
+          setSessions([])  // 设置为空数组以避免后续错误
+        }
+      } catch (profileErr) {
+        // 画像获取失败通常不应阻止登录成功，只需记录错误
+        console.error('登录后拉取画像/会话列表失败:', profileErr)
+      }
+
+
       navigate('/app/chat', { replace: true })
     } catch (err) {
       setError(err.message || '登录失败，请检查账号和密码')

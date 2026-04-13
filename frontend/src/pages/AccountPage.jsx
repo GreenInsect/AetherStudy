@@ -23,7 +23,7 @@ export default function AccountPage() {
         email: infoForm.email !== user.email ? infoForm.email : undefined,
       })
       // 更新 store 中的 user 对象
-      setAuth(localStorage.getItem('edumind_token'), updated)
+      setAuth(localStorage.getItem('AetherStudy_token'), updated)
       setInfoMsg({ type: 'success', text: '信息更新成功' })
     } catch (err) {
       setInfoMsg({ type: 'error', text: err.message })

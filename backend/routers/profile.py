@@ -37,7 +37,7 @@ def _save_profile(profile: StudentProfile):
             (profile.user_id, json.dumps(data, default=str), now)
         )
 
-
+# TODO
 @router.get("/me", response_model=ProfileResponse)
 async def get_my_profile(current_user: UserInDB = Depends(get_current_user)):
     """获取当前用户的学生画像"""
@@ -72,6 +72,7 @@ async def update_profile(
     if request.extracted_features:
         f = request.extracted_features
         if f.get("major"): profile.major = f["major"]
+        if f.get("description"): profile.description = f["description"]
         if f.get("grade"): profile.grade = f["grade"]
         if f.get("cognition_style"): profile.cognition_style = f["cognition_style"]
         if f.get("learning_pace"): profile.learning_pace = f["learning_pace"]

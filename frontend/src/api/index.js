@@ -7,7 +7,7 @@ const BASE_URL = '/api'
 
 /** 从 store 获取 token（避免循环依赖，直接读 localStorage）*/
 function getToken() {
-  return localStorage.getItem('edumind_token')
+  return localStorage.getItem('AetherStudy_token')
 }
 
 /** 构建带鉴权的请求头 */
@@ -28,8 +28,8 @@ async function apiFetch(path, options = {}) {
   })
   if (res.status === 401) {
     // Token 失效，清除本地认证并跳转登录
-    localStorage.removeItem('edumind_token')
-    localStorage.removeItem('edumind_user')
+    localStorage.removeItem('AetherStudy_token')
+    localStorage.removeItem('AetherStudy_user')
     window.location.href = '/login'
     return
   }
@@ -221,4 +221,65 @@ export async function submitQuiz(userId, quizResourceId, answers) {
     body: JSON.stringify({ user_id: userId, quiz_resource_id: quizResourceId, answers }),
   })
   return res?.json()
+}
+
+// ===== 聊天会话 API =====
+
+export async function apiListSessions() {
+  const res = await apiFetch('/chat/sessions')
+  return res?.json()
+}
+
+export async function apiCreateSession(mode = 'general', title = '新对话') {
+  const res = await apiFetch('/chat/sessions', {
+    method: 'POST',
+    body: JSON.stringify({ mode, title }),
+  })
+  return res?.json()
+}
+
+export async function apiGetSession(sessionId) {
+  const res = await apiFetch(`/chat/sessions/${sessionId}`)
+  return res?.json()
+}
+
+export async function apiRenameSession(sessionId, title) {
+  const res = await apiFetch(`/chat/sessions/${sessionId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ title }),
+  })
+  return res?.json()
+}
+
+export async function apiDeleteSession(sessionId) {
+  const res = await apiFetch(`/chat/sessions/${sessionId}`, { method: 'DELETE' })
+  return res?.json()
+}
+
+export async function apiClearAllSessions() {
+  const res = await apiFetch('/chat/sessions', { method: 'DELETE' })
+  return res?.json()
+}
+
+export async function* streamChatMessage(sessionId, content, mode = 'general') {
+  const response = await fetch(`${BASE_URL}/chat/stream`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ session_id: sessionId, content, mode }),
+  })
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}))
+    throw new Error(err.detail || '发送失败')
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    const chunk = decoder.decode(value)
+    const lines = chunk.split('\n').filter(l => l.startsWith('data: '))
+    for (const line of lines) {
+      try { yield JSON.parse(line.slice(6)) } catch {}
+    }
+  }
 }

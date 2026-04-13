@@ -108,14 +108,38 @@ def init_db():
                 created_at  TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
+            -- 聊天会话表
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                id          TEXT PRIMARY KEY,
+                user_id     TEXT NOT NULL,
+                title       TEXT NOT NULL DEFAULT '新对话',
+                mode        TEXT NOT NULL DEFAULT 'general',
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            -- 聊天消息表
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id          TEXT PRIMARY KEY,
+                session_id  TEXT NOT NULL,
+                role        TEXT NOT NULL,
+                content     TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+            );
 
             -- ============================================================
             -- 索引
             -- ============================================================
             CREATE INDEX IF NOT EXISTS idx_users_email    ON users(email);
             CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
-            CREATE INDEX IF NOT EXISTS idx_revoked_tokens_user ON revoked_tokens(user_id);
-            CREATE INDEX IF NOT EXISTS idx_learning_paths_user ON learning_paths(user_id);
-            CREATE INDEX IF NOT EXISTS idx_assessments_user    ON assessment_records(user_id);
+            CREATE INDEX IF NOT EXISTS idx_revoked_tokens_user  ON revoked_tokens(user_id);
+            CREATE INDEX IF NOT EXISTS idx_learning_paths_user  ON learning_paths(user_id);
+            CREATE INDEX IF NOT EXISTS idx_assessments_user     ON assessment_records(user_id);
+            CREATE INDEX IF NOT EXISTS idx_chat_sessions_user   ON chat_sessions(user_id);
+            CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated ON chat_sessions(updated_at);
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id);
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at);
         """)
     print(f"[DB] 数据库初始化完成: {DB_PATH}")
