@@ -38,7 +38,7 @@ client = AsyncOpenAI(
     base_url=base_url
 )
 
-# ─── Pydantic 模型 ─────────────────────────────────────────────────
+# Pydantic 模型
 
 class MessageItem(BaseModel):
     id: str
@@ -77,7 +77,7 @@ class ChatRequest(BaseModel):
     mode: str = "general"
 
 
-# ─── 工具函数 ──────────────────────────────────────────────────────
+# 工具函数
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -122,7 +122,7 @@ def _row_to_session(row, last_message: str = None) -> dict:
     }
 
 
-# ─── 会话 CRUD ────────────────────────────────────────────────────
+#  会话 CRUD 
 
 @router.get("/sessions", response_model=List[SessionItem])
 async def list_sessions(current_user: UserInDB = Depends(get_current_user)):
@@ -207,7 +207,7 @@ async def clear_all_sessions(current_user: UserInDB = Depends(get_current_user))
     return {"status": "cleared"}
 
 
-# ─── 流式聊天（核心，自动持久化） ─────────────────────────────────
+# 流式聊天（核心，自动持久化）
 
 @router.post("/stream")
 async def chat_stream(req: ChatRequest, current_user: UserInDB = Depends(get_current_user)):

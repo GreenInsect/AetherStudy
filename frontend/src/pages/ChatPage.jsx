@@ -64,12 +64,12 @@ export default function ChatPage() {
     }
   }
 
-  // ── 滚动到底部 ─────────────────────────────────────────────────
+  //  滚动到底部 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [activeMessages])
 
-  // ── 新建会话 ───────────────────────────────────────────────────
+  //  新建会话 
   const handleNewSession = async () => {
     try {
       const session = await apiCreateSession(chatMode)
@@ -80,7 +80,7 @@ export default function ChatPage() {
     }
   }
 
-  // ── 切换会话（从后端加载消息） ─────────────────────────────────
+  //  切换会话（从后端加载消息） 
   const handleSelectSession = async (sessionId) => {
     if (sessionId === activeSessionId || streaming) return
     setSessionLoading(true)
@@ -96,7 +96,7 @@ export default function ChatPage() {
     }
   }
 
-  // ── 删除会话 ───────────────────────────────────────────────────
+  //  删除会话 
   const handleDeleteSession = async (e, sessionId) => {
     e.stopPropagation()
     try {
@@ -200,7 +200,7 @@ export default function ChatPage() {
 
   return (
     <div className="chat-page-v2">
-      {/* ── 左：历史会话面板 ── */}
+      {/*  左：历史会话面板  */}
       <div className="chat-history-panel">
         <div className="history-panel-header">
           <span className="history-panel-title">历史对话</span>
@@ -257,7 +257,7 @@ export default function ChatPage() {
         )}
       </div>
 
-      {/* ── 中：消息区 ── */}
+      {/*  中：消息区  */}
       <div className="chat-main">
         {/* 模式选择 */}
         <div className="chat-mode-bar">
@@ -350,7 +350,7 @@ export default function ChatPage() {
         </div>
       </div>
 
-      {/* ── 右：功能面板 ── */}
+      {/*  右：功能面板  */}
       <div className="chat-sidebar">
         <ProfileSummaryCard profile={profile} />
         <div className="chat-actions-card">
@@ -373,7 +373,7 @@ export default function ChatPage() {
   )
 }
 
-// ── 会话条目组件 ──────────────────────────────────────────────────
+//  会话条目组件 ─
 function SessionItem({ session, active, onSelect, onDelete, onRename }) {
   const [editing, setEditing] = useState(false)
   const [editTitle, setEditTitle] = useState(session.title)
@@ -476,7 +476,7 @@ function SessionItem({ session, active, onSelect, onDelete, onRename }) {
   )
 }
 
-// ── 消息气泡 ──────────────────────────────────────────────────────
+// 消息气泡
 function MessageBubble({ msg }) {
   const isAI = msg.role === 'assistant'
   const isStreaming = msg.id?.startsWith('streaming-ai-')
@@ -499,7 +499,7 @@ function MessageBubble({ msg }) {
   )
 }
 
-// ── 画像摘要卡 ────────────────────────────────────────────────────
+//  画像摘要卡 ─
 function ProfileSummaryCard({ profile }) {
   if (!profile) {
     return (

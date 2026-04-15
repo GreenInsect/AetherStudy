@@ -8,7 +8,7 @@ export default function AccountPage() {
   const navigate = useNavigate()
   const { user, setAuth, clearAuth } = useAppStore()
 
-  // ── 基本信息编辑 ──────────────────────────────
+  // 基本信息编辑
   const [infoForm, setInfoForm] = useState({ username: user?.username || '', email: user?.email || '' })
   const [infoLoading, setInfoLoading] = useState(false)
   const [infoMsg, setInfoMsg] = useState(null) // { type: 'success'|'error', text }
@@ -32,7 +32,7 @@ export default function AccountPage() {
     }
   }
 
-  // ── 修改密码 ──────────────────────────────────
+  //  修改密码
   const [pwdForm, setPwdForm] = useState({ old: '', new: '', confirm: '' })
   const [showPwd, setShowPwd] = useState({ old: false, new: false, confirm: false })
   const [pwdLoading, setPwdLoading] = useState(false)
@@ -62,7 +62,7 @@ export default function AccountPage() {
     }
   }
 
-  // ── 注销账户 ──────────────────────────────────
+  // 注销账户
   const [deleteConfirm, setDeleteConfirm] = useState('')
   const [deleteLoading, setDeleteLoading] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)

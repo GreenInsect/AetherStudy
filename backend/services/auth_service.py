@@ -24,7 +24,7 @@ from passlib.context import CryptContext
 from database.db import get_db
 from models.user import UserInDB
 
-# ─── 配置 ──────────────────────────────────────────────────────────────────
+# 配置
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "AetherStudy-dev-secret-key-change-in-production-2026")
 ALGORITHM  = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "1440"))  # 默认 24 小时
@@ -36,7 +36,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
-# ─── 密码工具 ──────────────────────────────────────────────────────────────
+# 密码工具
 
 def hash_password(plain_password: str) -> str:
     """将明文密码哈希为 bcrypt 字符串"""
@@ -48,7 +48,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
 
-# ─── JWT 工具 ──────────────────────────────────────────────────────────────
+#  JWT 工具
 
 def create_access_token(user_id: str, username: str) -> tuple[str, int]:
     """
@@ -111,7 +111,7 @@ def revoke_token(jti: str, user_id: str):
         )
 
 
-# ─── 用户查询工具 ──────────────────────────────────────────────────────────
+# 用户查询工具 
 
 def get_user_by_id(user_id: str) -> Optional[UserInDB]:
     with get_db() as conn:
@@ -131,7 +131,7 @@ def get_user_by_identifier(identifier: str) -> Optional[UserInDB]:
         return UserInDB.from_row(row) if row else None
 
 
-# ─── FastAPI 依赖注入 ──────────────────────────────────────────────────────
+# FastAPI 依赖注入
 
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)
