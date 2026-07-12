@@ -328,7 +328,7 @@ export default function AssessmentPage() {
     }
   }
 
-  const canGenerate = selectedSubjectId && topic.trim() && documents.length > 0 && busy !== 'generate'
+  const canGenerate = selectedSubjectId && topic.trim() && busy !== 'generate'
 
   return (
     <div className="study-page">
@@ -336,10 +336,10 @@ export default function AssessmentPage() {
         <div className="study-hero-copy">
           <div className="study-eyebrow">
             <Database size={16} />
-            <span>本地资料 + 联网资料共同出题</span>
+            <span>持久知识库 + 用户资料 + 联网资料共同出题</span>
           </div>
           <h1>学科题库生成</h1>
-          <p>先按学科上传 Markdown 或 PDF 资料，再指定题型和数量生成题目。题目会保存到本地历史，答案默认隐藏。</p>
+          <p>选择学科和主题即可生成题目；可额外上传即时资料增强本次学科上下文。题目会保存到本地历史，答案默认隐藏。</p>
         </div>
         <div className="study-hero-stats">
           <div>
@@ -348,7 +348,7 @@ export default function AssessmentPage() {
           </div>
           <div>
             <strong>{documents.length}</strong>
-            <span>当前资料</span>
+            <span>用户资料</span>
           </div>
           <div>
             <strong>{history.length}</strong>
@@ -410,7 +410,7 @@ export default function AssessmentPage() {
             <div className="study-card-header">
               <div>
                 <h2>{selectedSubject?.name || '请选择学科'}</h2>
-                <p>上传资料后才能生成题目；出题时会强制同时使用本地资料和联网资料。</p>
+                <p>用户资料是可选增强项；未上传时会优先使用管理员持久知识库和可用联网资料。</p>
               </div>
               <label className={`btn-study-upload ${!selectedSubjectId ? 'disabled' : ''}`}>
                 {busy === 'upload' ? <Loader2 size={16} className="spin" /> : <Upload size={16} />}
@@ -455,7 +455,7 @@ export default function AssessmentPage() {
             <div className="study-card-header">
               <div>
                 <h2>生成题目</h2>
-                <p>题型和数量由你指定，生成结果自动进入历史记录。</p>
+                <p>题型和数量由你指定；没有用户上传资料时，会使用管理员持久知识库作为 RAG 来源。</p>
               </div>
             </div>
 
@@ -504,7 +504,7 @@ export default function AssessmentPage() {
             <section className="study-empty-state">
               <Wand2 size={42} />
               <h3>还没有当前题组</h3>
-              <p>选择学科、上传资料，然后生成题目。</p>
+              <p>选择学科并填写主题即可生成题目；上传资料是可选增强。</p>
             </section>
           )}
         </main>

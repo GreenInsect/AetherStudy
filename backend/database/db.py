@@ -168,11 +168,51 @@ def init_db():
                 chunk_index INTEGER NOT NULL,
                 content     TEXT NOT NULL,
                 embedding_json TEXT NOT NULL DEFAULT '{}',
+                embedding_provider TEXT NOT NULL DEFAULT 'lightweight_hash',
+                embedding_model TEXT NOT NULL DEFAULT 'local_hash_96',
+                embedding_dim INTEGER NOT NULL DEFAULT 96,
                 token_count INTEGER NOT NULL DEFAULT 0,
                 created_at  TEXT NOT NULL,
                 FOREIGN KEY (document_id) REFERENCES study_documents(id) ON DELETE CASCADE,
                 FOREIGN KEY (subject_id) REFERENCES study_subjects(id) ON DELETE CASCADE,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            -- ============================================================
+            -- 管理员持久知识库（服务器目录资料，供所有用户 RAG 使用）
+            -- ============================================================
+            CREATE TABLE IF NOT EXISTS study_admin_documents (
+                id          TEXT PRIMARY KEY,
+                subject_name TEXT NOT NULL,
+                filename    TEXT NOT NULL,
+                file_type   TEXT NOT NULL,
+                char_count  INTEGER NOT NULL DEFAULT 0,
+                content     TEXT NOT NULL,
+                storage_path TEXT UNIQUE NOT NULL,
+                content_hash TEXT NOT NULL DEFAULT '',
+                file_mtime  REAL NOT NULL DEFAULT 0,
+                chunk_count INTEGER NOT NULL DEFAULT 0,
+                vector_index_ready INTEGER NOT NULL DEFAULT 0,
+                embedding_provider TEXT NOT NULL DEFAULT 'lightweight_hash',
+                embedding_model TEXT NOT NULL DEFAULT 'local_hash_96',
+                embedding_dim INTEGER NOT NULL DEFAULT 96,
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS study_admin_document_chunks (
+                id          TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                subject_name TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                content     TEXT NOT NULL,
+                embedding_json TEXT NOT NULL DEFAULT '{}',
+                embedding_provider TEXT NOT NULL DEFAULT 'lightweight_hash',
+                embedding_model TEXT NOT NULL DEFAULT 'local_hash_96',
+                embedding_dim INTEGER NOT NULL DEFAULT 96,
+                token_count INTEGER NOT NULL DEFAULT 0,
+                created_at  TEXT NOT NULL,
+                FOREIGN KEY (document_id) REFERENCES study_admin_documents(id) ON DELETE CASCADE
             );
 
             -- ============================================================
@@ -241,6 +281,10 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_documents_subject    ON study_documents(subject_id);
             CREATE INDEX IF NOT EXISTS idx_document_chunks_doc  ON study_document_chunks(document_id);
             CREATE INDEX IF NOT EXISTS idx_document_chunks_subject ON study_document_chunks(subject_id);
+            CREATE INDEX IF NOT EXISTS idx_admin_documents_subject ON study_admin_documents(subject_name);
+            CREATE INDEX IF NOT EXISTS idx_admin_documents_path ON study_admin_documents(storage_path);
+            CREATE INDEX IF NOT EXISTS idx_admin_chunks_doc ON study_admin_document_chunks(document_id);
+            CREATE INDEX IF NOT EXISTS idx_admin_chunks_subject ON study_admin_document_chunks(subject_name);
             CREATE INDEX IF NOT EXISTS idx_quiz_sets_user       ON quiz_sets(user_id);
             CREATE INDEX IF NOT EXISTS idx_quiz_sets_subject    ON quiz_sets(subject_id);
             CREATE INDEX IF NOT EXISTS idx_quiz_questions_set   ON quiz_questions(quiz_set_id);
@@ -262,4 +306,15 @@ def init_db():
         }.items():
             if column_name not in existing_document_columns:
                 conn.execute(f"ALTER TABLE study_documents ADD COLUMN {column_name} {column_sql}")
+
+        existing_chunk_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(study_document_chunks)").fetchall()
+        }
+        for column_name, column_sql in {
+            "embedding_provider": "TEXT NOT NULL DEFAULT 'lightweight_hash'",
+            "embedding_model": "TEXT NOT NULL DEFAULT 'local_hash_96'",
+            "embedding_dim": "INTEGER NOT NULL DEFAULT 96",
+        }.items():
+            if column_name not in existing_chunk_columns:
+                conn.execute(f"ALTER TABLE study_document_chunks ADD COLUMN {column_name} {column_sql}")
     print(f"[DB] 数据库初始化完成: {DB_PATH}")

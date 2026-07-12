@@ -81,7 +81,7 @@ export default function Layout() {
               className={({ isActive }) => `nav-item nav-item--admin ${isActive ? 'nav-item--active' : ''}`}
             >
               <Shield size={20} className="nav-icon" />
-              {sidebarOpen && <span className="nav-label">用户管理</span>}
+              {sidebarOpen && <span className="nav-label">管理员控制台</span>}
             </NavLink>
           )}
         </nav>
@@ -158,7 +158,7 @@ export default function Layout() {
                       onClick={() => { navigate('/app/admin'); setUserMenuOpen(false) }}
                     >
                       <Shield size={15} />
-                      用户管理
+                      管理员控制台
                     </button>
                   )}
 

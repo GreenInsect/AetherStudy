@@ -17,13 +17,13 @@ from urllib.parse import quote
 from xml.etree import ElementTree
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel, Field
 
 from database.db import get_db
 from models.user import UserInDB
-from services.auth_service import get_current_user
-from services.llm_settings import complete_llm_json, get_user_llm_settings
+from services.auth_service import get_current_admin, get_current_user
+from services.llm_settings import LLMSettings, complete_llm_json, get_user_llm_settings
 
 router = APIRouter()
 
@@ -32,6 +32,21 @@ SUPPORTED_EXTENSIONS = {".md", ".markdown", ".txt", ".pdf"}
 WEB_TIMEOUT_SECONDS = float(os.getenv("AETHERSTUDY_WEB_TIMEOUT", "15"))
 WEB_PROXY = os.getenv("AETHERSTUDY_WEB_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
 UPLOAD_ROOT = Path(os.getenv("AETHERSTUDY_UPLOAD_DIR") or Path(__file__).resolve().parents[1] / "storage" / "study_uploads")
+ADMIN_KB_ROOT = Path(os.getenv("AETHERSTUDY_ADMIN_KB_DIR") or Path(__file__).resolve().parents[1] / "storage" / "admin_knowledge")
+DEEP_RAG_ENABLED = os.getenv("AETHERSTUDY_DEEP_RAG_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+DEEP_RAG_EMBEDDING_PROVIDER = "dashscope"
+DEEP_RAG_EMBEDDING_MODEL = os.getenv("AETHERSTUDY_EMBEDDING_MODEL", "text-embedding-v4")
+DEEP_RAG_EMBEDDING_BASE_URL = (
+    os.getenv("DASHSCOPE_BASE_URL")
+    or os.getenv("AETHERSTUDY_EMBEDDING_BASE_URL")
+    or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+)
+DEEP_RAG_EMBEDDING_DIMENSIONS = int(os.getenv("AETHERSTUDY_EMBEDDING_DIMENSIONS", "1024"))
+DEEP_RAG_EMBEDDING_BATCH_SIZE = max(1, min(10, int(os.getenv("AETHERSTUDY_EMBEDDING_BATCH_SIZE", "10"))))
+DEEP_RAG_TIMEOUT_SECONDS = float(os.getenv("AETHERSTUDY_EMBEDDING_TIMEOUT", "30"))
+LIGHTWEIGHT_EMBEDDING_PROVIDER = "lightweight_hash"
+LIGHTWEIGHT_EMBEDDING_MODEL = "local_hash_96"
+ADMIN_KB_COMMON_SUBJECTS = {"通用", "general", "common", "global"}
 
 
 def _debug(step: str, **data: Any) -> None:
@@ -68,6 +83,10 @@ class QuizGenerateRequest(BaseModel):
 class FrontendDebugLogRequest(BaseModel):
     step: str = Field(..., min_length=1, max_length=120)
     data: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AdminKnowledgeReindexRequest(BaseModel):
+    force: bool = False
 
 
 def _now() -> str:
@@ -207,6 +226,69 @@ def _delete_document_storage(path: str) -> None:
         _debug_exception("document_storage_delete_failed", exc, path=path)
 
 
+def _file_content_hash(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _extract_document_text(filename: str, data: bytes) -> tuple[str, str]:
+    ext = _extension(filename)
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise ValueError(f"unsupported_file_extension: {filename}")
+    text = _extract_pdf_text(data) if ext == ".pdf" else _decode_text(data)
+    return ext, _clean_text(text)
+
+
+def _iter_admin_knowledge_files() -> List[Path]:
+    ADMIN_KB_ROOT.mkdir(parents=True, exist_ok=True)
+    files: List[Path] = []
+    for path in sorted(ADMIN_KB_ROOT.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            rel_parts = path.relative_to(ADMIN_KB_ROOT).parts
+        except ValueError:
+            rel_parts = path.parts
+        if any(part.startswith(".") for part in rel_parts):
+            continue
+        if _extension(path.name) in SUPPORTED_EXTENSIONS:
+            files.append(path)
+    return files
+
+
+def _admin_subject_from_path(path: Path) -> str:
+    try:
+        rel = path.relative_to(ADMIN_KB_ROOT)
+        return rel.parts[0] if len(rel.parts) > 1 else "通用"
+    except ValueError:
+        return "通用"
+
+
+def _admin_subject_dir(subject_name: str) -> Path:
+    safe_subject = _safe_filename(subject_name.strip() or "通用")
+    return ADMIN_KB_ROOT / safe_subject
+
+
+def _admin_storage_path(subject_name: str, filename: str) -> Path:
+    directory = _admin_subject_dir(subject_name)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / _safe_filename(filename)
+
+
+def _delete_admin_document_storage(path: str) -> None:
+    if not path:
+        return
+    file_path = Path(path)
+    try:
+        if file_path.is_file() and ADMIN_KB_ROOT.resolve() in file_path.resolve().parents:
+            parent = file_path.parent
+            file_path.unlink()
+            while parent != ADMIN_KB_ROOT and parent.exists() and not any(parent.iterdir()):
+                parent.rmdir()
+                parent = parent.parent
+    except Exception as exc:
+        _debug_exception("admin_kb_storage_delete_failed", exc, path=path)
+
+
 def _embedding_from_tokens(tokens: List[str], dimensions: int = 96) -> List[float]:
     vector = [0.0] * dimensions
     for token in tokens:
@@ -215,6 +297,132 @@ def _embedding_from_tokens(tokens: List[str], dimensions: int = 96) -> List[floa
         vector[bucket] += 1.0
     norm = math.sqrt(sum(value * value for value in vector)) or 1.0
     return [round(value / norm, 6) for value in vector]
+
+
+def _set_lightweight_embedding(chunk: Dict[str, Any]) -> None:
+    embedding = _embedding_from_tokens(chunk.get("tokens") or _tokens(chunk.get("content") or ""))
+    chunk["embedding"] = embedding
+    chunk["embedding_provider"] = LIGHTWEIGHT_EMBEDDING_PROVIDER
+    chunk["embedding_model"] = LIGHTWEIGHT_EMBEDDING_MODEL
+    chunk["embedding_dim"] = len(embedding)
+
+
+def _dashscope_api_key() -> str:
+    return os.getenv("DASHSCOPE_API_KEY") or os.getenv("AETHERSTUDY_EMBEDDING_API_KEY") or ""
+
+
+def _embedding_endpoint() -> str:
+    return f"{DEEP_RAG_EMBEDDING_BASE_URL.rstrip('/')}/embeddings"
+
+
+def _embedding_headers() -> Dict[str, str]:
+    api_key = _dashscope_api_key()
+    if not api_key:
+        raise ValueError("missing_dashscope_api_key")
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+
+async def _try_deep_embeddings(texts: List[str], purpose: str) -> Optional[List[List[float]]]:
+    cleaned = [_knowledge_text(text)[:6000] for text in texts if _knowledge_text(text)]
+    if not DEEP_RAG_ENABLED:
+        _debug("deep_rag_embedding_skipped_disabled", purpose=purpose)
+        return None
+    if not cleaned:
+        _debug("deep_rag_embedding_skipped_empty_text", purpose=purpose)
+        return None
+
+    _debug(
+        "deep_rag_embedding_start",
+        purpose=purpose,
+        text_count=len(cleaned),
+        provider=DEEP_RAG_EMBEDDING_PROVIDER,
+        model=DEEP_RAG_EMBEDDING_MODEL,
+        base_url=DEEP_RAG_EMBEDDING_BASE_URL,
+        dimensions=DEEP_RAG_EMBEDDING_DIMENSIONS,
+        batch_size=DEEP_RAG_EMBEDDING_BATCH_SIZE,
+        timeout_seconds=DEEP_RAG_TIMEOUT_SECONDS,
+        has_api_key=bool(_dashscope_api_key()),
+    )
+    try:
+        vectors: List[List[float]] = []
+        async with httpx.AsyncClient(timeout=DEEP_RAG_TIMEOUT_SECONDS, trust_env=True) as client:
+            for start in range(0, len(cleaned), DEEP_RAG_EMBEDDING_BATCH_SIZE):
+                batch = cleaned[start:start + DEEP_RAG_EMBEDDING_BATCH_SIZE]
+                payload: Dict[str, Any] = {"model": DEEP_RAG_EMBEDDING_MODEL, "input": batch}
+                if DEEP_RAG_EMBEDDING_DIMENSIONS > 0:
+                    payload["dimensions"] = DEEP_RAG_EMBEDDING_DIMENSIONS
+                response = await client.post(
+                    _embedding_endpoint(),
+                    headers=_embedding_headers(),
+                    json=payload,
+                )
+                _debug(
+                    "deep_rag_embedding_response",
+                    purpose=purpose,
+                    provider=DEEP_RAG_EMBEDDING_PROVIDER,
+                    batch_start=start,
+                    batch_size=len(batch),
+                    status_code=response.status_code,
+                    response_chars=len(response.text),
+                    content_type=response.headers.get("content-type"),
+                )
+                if response.status_code >= 400:
+                    raise ValueError(f"embedding_http_{response.status_code}: {response.text[:500]}")
+                data = response.json()
+                items = data.get("data") or []
+                vectors_by_index: Dict[int, List[float]] = {}
+                for item in items:
+                    index = int(item.get("index", len(vectors_by_index)))
+                    vector = item.get("embedding")
+                    if isinstance(vector, list) and vector:
+                        vectors_by_index[index] = [float(value) for value in vector]
+                vectors.extend(vectors_by_index[index] for index in range(len(batch)) if index in vectors_by_index)
+        if len(vectors) != len(cleaned):
+            raise ValueError(f"embedding_count_mismatch: expected={len(cleaned)} actual={len(vectors)}")
+        dims = sorted({len(vector) for vector in vectors})
+        if len(dims) != 1:
+            raise ValueError(f"embedding_dim_mismatch: dims={dims}")
+        _debug(
+            "deep_rag_embedding_done",
+            purpose=purpose,
+            provider=DEEP_RAG_EMBEDDING_PROVIDER,
+            model=DEEP_RAG_EMBEDDING_MODEL,
+            vector_count=len(vectors),
+            embedding_dim=dims[0],
+        )
+        return vectors
+    except Exception as exc:
+        _debug_exception(
+            "deep_rag_embedding_failed_fallback_lightweight",
+            exc,
+            purpose=purpose,
+            provider=DEEP_RAG_EMBEDDING_PROVIDER,
+            model=DEEP_RAG_EMBEDDING_MODEL,
+            base_url=DEEP_RAG_EMBEDDING_BASE_URL,
+            text_count=len(cleaned),
+        )
+        return None
+
+
+async def _attach_best_embeddings(chunks: List[Dict[str, Any]], purpose: str) -> str:
+    for chunk in chunks:
+        _set_lightweight_embedding(chunk)
+
+    vectors = await _try_deep_embeddings([chunk["content"] for chunk in chunks], purpose=purpose)
+    if not vectors:
+        _debug("rag_embedding_mode_selected", purpose=purpose, mode="lightweight", chunk_count=len(chunks))
+        return "lightweight"
+
+    for chunk, vector in zip(chunks, vectors):
+        chunk["embedding"] = vector
+        chunk["embedding_provider"] = DEEP_RAG_EMBEDDING_PROVIDER
+        chunk["embedding_model"] = DEEP_RAG_EMBEDDING_MODEL
+        chunk["embedding_dim"] = len(vector)
+    _debug("rag_embedding_mode_selected", purpose=purpose, mode="deep", chunk_count=len(chunks), embedding_dim=len(vectors[0]))
+    return "deep"
 
 
 def _cosine_similarity(left: List[float], right: List[float]) -> float:
@@ -237,7 +445,6 @@ def _build_document_chunks(text: str, max_chars: int = 1000) -> List[Dict[str, A
             "chunk_index": len(chunks),
             "content": chunk,
             "tokens": tokens,
-            "embedding": _embedding_from_tokens(tokens),
         })
     if not chunks:
         fallback = _knowledge_text(text)[:max_chars]
@@ -247,8 +454,9 @@ def _build_document_chunks(text: str, max_chars: int = 1000) -> List[Dict[str, A
             "chunk_index": 0,
             "content": fallback,
             "tokens": tokens,
-            "embedding": _embedding_from_tokens(tokens),
         })
+    for chunk in chunks:
+        _set_lightweight_embedding(chunk)
     return chunks
 
 
@@ -277,8 +485,9 @@ def _ensure_vector_index_for_subject(conn, subject_id: str, user_id: str) -> Non
         for chunk in chunks:
             conn.execute(
                 """INSERT INTO study_document_chunks
-                   (id, document_id, subject_id, user_id, chunk_index, content, embedding_json, token_count, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (id, document_id, subject_id, user_id, chunk_index, content,
+                    embedding_json, embedding_provider, embedding_model, embedding_dim, token_count, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     chunk["id"],
                     doc["id"],
@@ -287,6 +496,9 @@ def _ensure_vector_index_for_subject(conn, subject_id: str, user_id: str) -> Non
                     chunk["chunk_index"],
                     chunk["content"],
                     json.dumps(chunk["embedding"], ensure_ascii=False),
+                    chunk["embedding_provider"],
+                    chunk["embedding_model"],
+                    chunk["embedding_dim"],
                     len(chunk["tokens"]),
                     now,
                 ),
@@ -367,9 +579,12 @@ def _retrieve_local_context(conn, subject_id: str, user_id: str, query: str, lim
             if query and query.lower() in lower:
                 lexical_score += 3
             vector_score = _cosine_similarity(query_embedding, embedding)
+            if vector_score == 0.0 and len(embedding) != len(query_embedding):
+                vector_score = _cosine_similarity(query_embedding, _embedding_from_tokens(_tokens(content)))
             ranked.append({
                 "document_id": row["document_id"],
                 "filename": row["filename"],
+                "source_type": "user_upload",
                 "excerpt": content[:900],
                 "score": round(lexical_score + vector_score * 8, 4),
                 "vector_score": round(vector_score, 4),
@@ -418,6 +633,7 @@ def _retrieve_local_context(conn, subject_id: str, user_id: str, query: str, lim
             ranked.append({
                 "document_id": doc["id"],
                 "filename": doc["filename"],
+                "source_type": "user_upload",
                 "excerpt": chunk[:900],
                 "score": score,
             })
@@ -431,6 +647,401 @@ def _retrieve_local_context(conn, subject_id: str, user_id: str, query: str, lim
         top_scores=[{"filename": item["filename"], "score": item["score"], "excerpt": item["excerpt"][:120]} for item in result[:5]],
     )
     return result
+
+
+def _score_chunk_rows(
+    chunk_rows,
+    query: str,
+    query_embedding: List[float],
+    limit: int,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    dim: Optional[int] = None,
+    source_type: str = "user_upload",
+) -> List[Dict[str, Any]]:
+    query_tokens = set(_tokens(query))
+    ranked: List[Dict[str, Any]] = []
+    for row in chunk_rows:
+        if provider and row["embedding_provider"] != provider:
+            continue
+        if model and row["embedding_model"] != model:
+            continue
+        if dim and int(row["embedding_dim"] or 0) != dim:
+            continue
+        raw_content = row["content"] or ""
+        if _is_low_value_knowledge_text(raw_content):
+            continue
+        content = _knowledge_text(raw_content)
+        if _is_low_value_knowledge_text(content):
+            continue
+        lower = content.lower()
+        try:
+            embedding = json.loads(row["embedding_json"] or "[]")
+        except json.JSONDecodeError:
+            embedding = []
+        lexical_score = sum(lower.count(token) for token in query_tokens)
+        if query and query.lower() in lower:
+            lexical_score += 3
+        vector_score = _cosine_similarity(query_embedding, embedding)
+        if vector_score == 0.0 and len(embedding) != len(query_embedding):
+            vector_score = _cosine_similarity(query_embedding, _embedding_from_tokens(_tokens(content)))
+        ranked.append({
+            "document_id": row["document_id"],
+            "filename": row["filename"],
+            "source_type": source_type,
+            "excerpt": content[:900],
+            "score": round(lexical_score + vector_score * 8, 4),
+            "vector_score": round(vector_score, 4),
+            "token_count": row["token_count"],
+            "embedding_provider": row["embedding_provider"],
+            "embedding_model": row["embedding_model"],
+            "embedding_dim": row["embedding_dim"],
+        })
+    ranked.sort(key=lambda item: item["score"], reverse=True)
+    return ranked[:limit]
+
+
+async def _retrieve_local_context_deep_or_light(
+    conn,
+    settings: LLMSettings,
+    subject_id: str,
+    user_id: str,
+    query: str,
+    limit: int = 5,
+) -> List[Dict[str, Any]]:
+    _debug("rag_retrieval_start", subject_id=subject_id, user_id=user_id, query=query, limit=limit)
+    _ensure_vector_index_for_subject(conn, subject_id, user_id)
+    chunk_rows = conn.execute(
+        """SELECT c.document_id, d.filename, c.content, c.embedding_json, c.embedding_provider,
+                  c.embedding_model, c.embedding_dim, c.token_count
+           FROM study_document_chunks c
+           JOIN study_documents d ON d.id = c.document_id
+           WHERE c.subject_id = ? AND c.user_id = ?
+           ORDER BY d.created_at DESC, c.chunk_index ASC""",
+        (subject_id, user_id),
+    ).fetchall()
+    provider_counts: Dict[str, int] = {}
+    for row in chunk_rows:
+        provider_counts[row["embedding_provider"]] = provider_counts.get(row["embedding_provider"], 0) + 1
+    _debug("rag_retrieval_chunks_loaded", chunk_count=len(chunk_rows), provider_counts=provider_counts)
+
+    deep_query_vectors = await _try_deep_embeddings([query], purpose="query_retrieval")
+    if deep_query_vectors:
+        deep_query = deep_query_vectors[0]
+        deep_results = _score_chunk_rows(
+            chunk_rows,
+            query,
+            deep_query,
+            limit,
+            provider=DEEP_RAG_EMBEDDING_PROVIDER,
+            model=DEEP_RAG_EMBEDDING_MODEL,
+            dim=len(deep_query),
+        )
+        if deep_results:
+            _debug(
+                "deep_rag_retrieval_done",
+                returned_count=len(deep_results),
+                top_scores=[
+                    {
+                        "filename": item["filename"],
+                        "score": item["score"],
+                        "vector_score": item["vector_score"],
+                        "excerpt": item["excerpt"][:120],
+                    }
+                    for item in deep_results[:5]
+                ],
+            )
+            return deep_results
+        _debug(
+            "deep_rag_retrieval_empty_fallback_lightweight",
+            deep_chunk_count=provider_counts.get(DEEP_RAG_EMBEDDING_PROVIDER, 0),
+            query_embedding_dim=len(deep_query),
+            model=DEEP_RAG_EMBEDDING_MODEL,
+        )
+    else:
+        _debug("deep_rag_query_embedding_unavailable_fallback_lightweight", query=query)
+
+    return _retrieve_local_context(conn, subject_id, user_id, query, limit=limit)
+
+
+async def _retrieve_admin_context_deep_or_light(
+    conn,
+    settings: LLMSettings,
+    subject_name: str,
+    query: str,
+    limit: int = 5,
+) -> List[Dict[str, Any]]:
+    subject_key = subject_name.strip().lower()
+    include_all_subjects = subject_key in {"", "*", "all", "__all__"}
+    candidates = {subject_key, *(item.lower() for item in ADMIN_KB_COMMON_SUBJECTS)}
+    candidates.discard("")
+
+    if include_all_subjects:
+        chunk_rows = conn.execute(
+            """SELECT c.document_id, d.filename, d.subject_name, c.content, c.embedding_json,
+                      c.embedding_provider, c.embedding_model, c.embedding_dim, c.token_count
+               FROM study_admin_document_chunks c
+               JOIN study_admin_documents d ON d.id = c.document_id
+               ORDER BY d.updated_at DESC, c.chunk_index ASC"""
+        ).fetchall()
+    else:
+        placeholders = ",".join("?" for _ in candidates)
+        if not placeholders:
+            _debug("admin_rag_retrieval_skipped_no_subject", subject_name=subject_name, query=query)
+            return []
+        chunk_rows = conn.execute(
+            f"""SELECT c.document_id, d.filename, d.subject_name, c.content, c.embedding_json,
+                       c.embedding_provider, c.embedding_model, c.embedding_dim, c.token_count
+                FROM study_admin_document_chunks c
+                JOIN study_admin_documents d ON d.id = c.document_id
+                WHERE LOWER(c.subject_name) IN ({placeholders})
+                ORDER BY d.updated_at DESC, c.chunk_index ASC""",
+            tuple(candidates),
+        ).fetchall()
+    provider_counts: Dict[str, int] = {}
+    for row in chunk_rows:
+        provider_counts[row["embedding_provider"]] = provider_counts.get(row["embedding_provider"], 0) + 1
+    _debug(
+        "admin_rag_retrieval_chunks_loaded",
+        subject_name=subject_name,
+        include_all_subjects=include_all_subjects,
+        candidate_subjects=sorted(candidates),
+        chunk_count=len(chunk_rows),
+        provider_counts=provider_counts,
+    )
+    if not chunk_rows:
+        return []
+
+    deep_query_vectors = await _try_deep_embeddings([query], purpose="admin_query_retrieval")
+    if deep_query_vectors:
+        deep_query = deep_query_vectors[0]
+        deep_results = _score_chunk_rows(
+            chunk_rows,
+            query,
+            deep_query,
+            limit,
+            provider=DEEP_RAG_EMBEDDING_PROVIDER,
+            model=DEEP_RAG_EMBEDDING_MODEL,
+            dim=len(deep_query),
+            source_type="admin_persistent",
+        )
+        if deep_results:
+            _debug(
+                "admin_deep_rag_retrieval_done",
+                returned_count=len(deep_results),
+                top_scores=[
+                    {
+                        "filename": item["filename"],
+                        "score": item["score"],
+                        "vector_score": item["vector_score"],
+                        "excerpt": item["excerpt"][:120],
+                    }
+                    for item in deep_results[:5]
+                ],
+            )
+            return deep_results
+        _debug(
+            "admin_deep_rag_retrieval_empty_fallback_lightweight",
+            deep_chunk_count=provider_counts.get(DEEP_RAG_EMBEDDING_PROVIDER, 0),
+            query_embedding_dim=len(deep_query),
+            model=DEEP_RAG_EMBEDDING_MODEL,
+        )
+
+    lightweight_query = _embedding_from_tokens(_tokens(query))
+    lightweight_results = _score_chunk_rows(
+        chunk_rows,
+        query,
+        lightweight_query,
+        limit,
+        source_type="admin_persistent",
+    )
+    _debug(
+        "admin_lightweight_rag_retrieval_done",
+        returned_count=len(lightweight_results),
+        top_scores=[
+            {"filename": item["filename"], "score": item["score"], "excerpt": item["excerpt"][:120]}
+            for item in lightweight_results[:5]
+        ],
+    )
+    return lightweight_results
+
+
+async def _retrieve_combined_context_deep_or_light(
+    conn,
+    settings: LLMSettings,
+    subject_id: str,
+    subject_name: str,
+    user_id: str,
+    query: str,
+    limit: int = 5,
+) -> List[Dict[str, Any]]:
+    user_context: List[Dict[str, Any]] = []
+    try:
+        user_context = await _retrieve_local_context_deep_or_light(conn, settings, subject_id, user_id, query, limit=limit)
+    except HTTPException as exc:
+        if exc.status_code != 400:
+            raise
+        _debug("user_upload_rag_unavailable_try_admin_kb", subject_id=subject_id, subject_name=subject_name, query=query, detail=exc.detail)
+
+    admin_context = await _retrieve_admin_context_deep_or_light(conn, settings, subject_name, query, limit=limit)
+    combined = [*user_context, *admin_context]
+    if not combined:
+        raise HTTPException(status_code=400, detail="该学科没有可用资料：用户上传资料为空，管理员持久知识库也没有匹配资料")
+
+    def priority(item: Dict[str, Any]) -> tuple[int, float]:
+        return (0 if item.get("source_type") == "user_upload" else 1, -float(item.get("score") or 0))
+
+    combined.sort(key=priority)
+    result = combined[: max(limit, 1)]
+    _debug(
+        "combined_rag_context_ready",
+        returned_count=len(result),
+        user_context_count=len(user_context),
+        admin_context_count=len(admin_context),
+        sources=[
+            {
+                "filename": item.get("filename"),
+                "source_type": item.get("source_type"),
+                "score": item.get("score"),
+                "excerpt": (item.get("excerpt") or "")[:100],
+            }
+            for item in result[:8]
+        ],
+    )
+    return result
+
+
+async def retrieve_admin_knowledge_context(
+    settings: LLMSettings,
+    query: str,
+    subject_name: str = "all",
+    limit: int = 4,
+) -> List[Dict[str, Any]]:
+    with get_db() as conn:
+        return await _retrieve_admin_context_deep_or_light(conn, settings, subject_name, query, limit=limit)
+
+
+async def _index_admin_knowledge_file(settings: LLMSettings, path: Path, force: bool = False) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "path": str(path),
+        "filename": path.name,
+        "subject_name": _admin_subject_from_path(path),
+    }
+    try:
+        data = path.read_bytes()
+        ext, text = _extract_document_text(path.name, data)
+        content_hash = _file_content_hash(data)
+        stat = path.stat()
+        result.update({"file_type": ext.lstrip("."), "char_count": len(text), "content_hash": content_hash[:16]})
+        if len(text) < 20:
+            result["status"] = "skipped_short_text"
+            _debug("admin_kb_file_skipped_short_text", **result)
+            return result
+
+        storage_path = str(path.resolve())
+        with get_db() as conn:
+            existing = conn.execute(
+                "SELECT * FROM study_admin_documents WHERE storage_path = ?",
+                (storage_path,),
+            ).fetchone()
+            if (
+                existing
+                and not force
+                and existing["content_hash"] == content_hash
+                and int(existing["vector_index_ready"] or 0) == 1
+            ):
+                result.update({
+                    "status": "skipped_unchanged",
+                    "document_id": existing["id"],
+                    "chunk_count": existing["chunk_count"],
+                    "embedding_provider": existing["embedding_provider"],
+                    "embedding_model": existing["embedding_model"],
+                    "embedding_dim": existing["embedding_dim"],
+                })
+                _debug("admin_kb_file_skipped_unchanged", **result)
+                return result
+            doc_id = existing["id"] if existing else str(uuid.uuid4())
+
+        chunks = _build_document_chunks(text)
+        embedding_mode = await _attach_best_embeddings(chunks, purpose=f"admin_kb:{result['subject_name']}:{path.name}")
+        now = _now()
+        with get_db() as conn:
+            conn.execute(
+                """INSERT INTO study_admin_documents
+                   (id, subject_name, filename, file_type, char_count, content, storage_path,
+                    content_hash, file_mtime, chunk_count, vector_index_ready,
+                    embedding_provider, embedding_model, embedding_dim, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(storage_path) DO UPDATE SET
+                    subject_name = excluded.subject_name,
+                    filename = excluded.filename,
+                    file_type = excluded.file_type,
+                    char_count = excluded.char_count,
+                    content = excluded.content,
+                    content_hash = excluded.content_hash,
+                    file_mtime = excluded.file_mtime,
+                    chunk_count = excluded.chunk_count,
+                    vector_index_ready = excluded.vector_index_ready,
+                    embedding_provider = excluded.embedding_provider,
+                    embedding_model = excluded.embedding_model,
+                    embedding_dim = excluded.embedding_dim,
+                    updated_at = excluded.updated_at""",
+                (
+                    doc_id,
+                    result["subject_name"],
+                    path.name,
+                    ext.lstrip("."),
+                    len(text),
+                    text,
+                    storage_path,
+                    content_hash,
+                    stat.st_mtime,
+                    len(chunks),
+                    1,
+                    chunks[0]["embedding_provider"] if chunks else LIGHTWEIGHT_EMBEDDING_PROVIDER,
+                    chunks[0]["embedding_model"] if chunks else LIGHTWEIGHT_EMBEDDING_MODEL,
+                    chunks[0]["embedding_dim"] if chunks else 96,
+                    now,
+                    now,
+                ),
+            )
+            conn.execute("DELETE FROM study_admin_document_chunks WHERE document_id = ?", (doc_id,))
+            for chunk in chunks:
+                conn.execute(
+                    """INSERT INTO study_admin_document_chunks
+                       (id, document_id, subject_name, chunk_index, content, embedding_json,
+                        embedding_provider, embedding_model, embedding_dim, token_count, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        chunk["id"],
+                        doc_id,
+                        result["subject_name"],
+                        chunk["chunk_index"],
+                        chunk["content"],
+                        json.dumps(chunk["embedding"], ensure_ascii=False),
+                        chunk["embedding_provider"],
+                        chunk["embedding_model"],
+                        chunk["embedding_dim"],
+                        len(chunk["tokens"]),
+                        now,
+                    ),
+                )
+
+        result.update({
+            "status": "indexed",
+            "document_id": doc_id,
+            "chunk_count": len(chunks),
+            "embedding_mode": embedding_mode,
+            "embedding_provider": chunks[0].get("embedding_provider") if chunks else None,
+            "embedding_model": chunks[0].get("embedding_model") if chunks else None,
+            "embedding_dim": chunks[0].get("embedding_dim") if chunks else None,
+        })
+        _debug("admin_kb_file_indexed", **result)
+        return result
+    except Exception as exc:
+        _debug_exception("admin_kb_file_index_failed", exc, **result)
+        result.update({"status": "failed", "error": f"{type(exc).__name__}: {exc}"})
+        return result
 
 
 def _flatten_duckduckgo_topics(items: List[Dict[str, Any]]) -> List[Dict[str, str]]:
@@ -834,6 +1445,7 @@ async def _generate_learning_questions_with_llm(
         {
             "index": index + 1,
             "filename": item["filename"],
+            "source_type": item.get("source_type", "user_upload"),
             "excerpt": _knowledge_text(item["excerpt"])[:1200],
         }
         for index, item in enumerate(local_context[: min(len(local_context), 8)])
@@ -1049,6 +1661,161 @@ async def frontend_debug_log(req: FrontendDebugLogRequest, current_user: UserInD
     return {"ok": True}
 
 
+@router.get("/admin/knowledge")
+async def list_admin_knowledge(_admin: UserInDB = Depends(get_current_admin)):
+    ADMIN_KB_ROOT.mkdir(parents=True, exist_ok=True)
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT id, subject_name, filename, file_type, char_count, storage_path,
+                      content_hash, file_mtime, chunk_count, vector_index_ready,
+                      embedding_provider, embedding_model, embedding_dim, created_at, updated_at
+               FROM study_admin_documents
+               ORDER BY subject_name ASC, filename ASC"""
+        ).fetchall()
+    summary: Dict[str, int] = {}
+    documents = [dict(row) for row in rows]
+    for item in documents:
+        summary[item["subject_name"]] = summary.get(item["subject_name"], 0) + 1
+    return {
+        "root": str(ADMIN_KB_ROOT),
+        "document_count": len(documents),
+        "summary": summary,
+        "documents": documents,
+    }
+
+
+@router.post("/admin/knowledge/upload", status_code=status.HTTP_201_CREATED)
+async def upload_admin_knowledge(
+    subject_name: str = Form(..., min_length=1, max_length=80),
+    files: List[UploadFile] = File(...),
+    admin: UserInDB = Depends(get_current_admin),
+):
+    settings = get_user_llm_settings(admin.id)
+    results: List[Dict[str, Any]] = []
+    _debug(
+        "admin_kb_upload_start",
+        admin_id=admin.id,
+        subject_name=subject_name,
+        file_count=len(files),
+        root=str(ADMIN_KB_ROOT),
+    )
+
+    for file in files:
+        result: Dict[str, Any] = {"filename": file.filename, "subject_name": subject_name}
+        try:
+            ext = _extension(file.filename or "")
+            if ext not in SUPPORTED_EXTENSIONS:
+                result.update({"status": "failed", "error": "仅支持 Markdown、TXT 和 PDF 文件"})
+                results.append(result)
+                _debug("admin_kb_upload_rejected_extension", **result, extension=ext)
+                continue
+
+            data = await file.read()
+            if len(data) > MAX_UPLOAD_BYTES:
+                result.update({"status": "failed", "error": "文件过大，单个文件最多 12MB", "bytes": len(data)})
+                results.append(result)
+                _debug("admin_kb_upload_rejected_size", **result)
+                continue
+
+            target_path = _admin_storage_path(subject_name, file.filename or "document")
+            target_path.write_bytes(data)
+            result.update({"storage_path": str(target_path), "bytes": len(data)})
+            _debug("admin_kb_upload_file_saved", **result)
+
+            indexed = await _index_admin_knowledge_file(settings, target_path, force=True)
+            results.append({**result, **indexed})
+        except Exception as exc:
+            _debug_exception("admin_kb_upload_file_failed", exc, **result)
+            results.append({**result, "status": "failed", "error": f"{type(exc).__name__}: {exc}"})
+
+    status_counts: Dict[str, int] = {}
+    for item in results:
+        status_counts[item["status"]] = status_counts.get(item["status"], 0) + 1
+    _debug("admin_kb_upload_done", admin_id=admin.id, subject_name=subject_name, status_counts=status_counts)
+    return {
+        "root": str(ADMIN_KB_ROOT),
+        "subject_name": subject_name,
+        "status_counts": status_counts,
+        "results": results,
+    }
+
+
+@router.post("/admin/knowledge/reindex")
+async def reindex_admin_knowledge(
+    req: AdminKnowledgeReindexRequest,
+    admin: UserInDB = Depends(get_current_admin),
+):
+    settings = get_user_llm_settings(admin.id)
+    files = _iter_admin_knowledge_files()
+    _debug(
+        "admin_kb_reindex_start",
+        admin_id=admin.id,
+        root=str(ADMIN_KB_ROOT),
+        file_count=len(files),
+        force=req.force,
+    )
+
+    seen_paths = {str(path.resolve()) for path in files}
+    removed: List[Dict[str, Any]] = []
+    with get_db() as conn:
+        existing_rows = conn.execute("SELECT id, storage_path, filename, subject_name FROM study_admin_documents").fetchall()
+        for row in existing_rows:
+            if row["storage_path"] in seen_paths:
+                continue
+            conn.execute("DELETE FROM study_admin_document_chunks WHERE document_id = ?", (row["id"],))
+            conn.execute("DELETE FROM study_admin_documents WHERE id = ?", (row["id"],))
+            removed.append({"document_id": row["id"], "filename": row["filename"], "subject_name": row["subject_name"]})
+    if removed:
+        _debug("admin_kb_removed_missing_files", removed_count=len(removed), removed=removed[:20])
+
+    results = []
+    for path in files:
+        results.append(await _index_admin_knowledge_file(settings, path, force=req.force))
+
+    status_counts: Dict[str, int] = {}
+    for item in results:
+        status_counts[item["status"]] = status_counts.get(item["status"], 0) + 1
+    _debug(
+        "admin_kb_reindex_done",
+        admin_id=admin.id,
+        status_counts=status_counts,
+        removed_count=len(removed),
+    )
+    return {
+        "root": str(ADMIN_KB_ROOT),
+        "file_count": len(files),
+        "status_counts": status_counts,
+        "removed": removed,
+        "results": results,
+    }
+
+
+@router.delete("/admin/knowledge/{document_id}")
+async def delete_admin_knowledge_document(
+    document_id: str,
+    _admin: UserInDB = Depends(get_current_admin),
+):
+    with get_db() as conn:
+        doc = conn.execute(
+            "SELECT id, subject_name, filename, storage_path FROM study_admin_documents WHERE id = ?",
+            (document_id,),
+        ).fetchone()
+        if not doc:
+            raise HTTPException(status_code=404, detail="管理员知识库资料不存在")
+        _debug(
+            "admin_kb_delete_start",
+            document_id=document_id,
+            subject_name=doc["subject_name"],
+            filename=doc["filename"],
+            storage_path=doc["storage_path"],
+        )
+        conn.execute("DELETE FROM study_admin_document_chunks WHERE document_id = ?", (document_id,))
+        conn.execute("DELETE FROM study_admin_documents WHERE id = ?", (document_id,))
+        _delete_admin_document_storage(doc["storage_path"])
+    _debug("admin_kb_delete_done", document_id=document_id)
+    return {"ok": True, "deleted_document_id": document_id}
+
+
 @router.post("/subjects", status_code=status.HTTP_201_CREATED)
 async def create_subject(req: SubjectCreate, current_user: UserInDB = Depends(get_current_user)):
     subject_id = str(uuid.uuid4())
@@ -1125,10 +1892,15 @@ async def upload_document(
     now = _now()
     storage_path, stored_filename = _save_uploaded_file(current_user.id, subject_id, doc_id, file.filename or "document", data)
     chunks = _build_document_chunks(text)
+    embedding_mode = await _attach_best_embeddings(chunks, purpose="document_upload")
     _debug(
         "document_vector_index_ready",
         document_id=doc_id,
         chunk_count=len(chunks),
+        embedding_mode=embedding_mode,
+        embedding_provider=chunks[0].get("embedding_provider") if chunks else None,
+        embedding_model=chunks[0].get("embedding_model") if chunks else None,
+        embedding_dim=chunks[0].get("embedding_dim") if chunks else None,
         storage_path=storage_path,
         stored_filename=stored_filename,
     )
@@ -1158,8 +1930,9 @@ async def upload_document(
         for chunk in chunks:
             conn.execute(
                 """INSERT INTO study_document_chunks
-                   (id, document_id, subject_id, user_id, chunk_index, content, embedding_json, token_count, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (id, document_id, subject_id, user_id, chunk_index, content,
+                    embedding_json, embedding_provider, embedding_model, embedding_dim, token_count, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     chunk["id"],
                     doc_id,
@@ -1168,6 +1941,9 @@ async def upload_document(
                     chunk["chunk_index"],
                     chunk["content"],
                     json.dumps(chunk["embedding"], ensure_ascii=False),
+                    chunk["embedding_provider"],
+                    chunk["embedding_model"],
+                    chunk["embedding_dim"],
                     len(chunk["tokens"]),
                     now,
                 ),
@@ -1238,16 +2014,30 @@ async def generate_quiz(req: QuizGenerateRequest, current_user: UserInDB = Depen
         count=req.count,
         difficulty=req.difficulty,
     )
+    settings = get_user_llm_settings(current_user.id)
     with get_db() as conn:
         subject = _get_subject(conn, req.subject_id, current_user.id)
-        local_context = _retrieve_local_context(conn, req.subject_id, current_user.id, req.topic, limit=max(5, req.count))
+        local_context = await _retrieve_combined_context_deep_or_light(
+            conn,
+            settings,
+            req.subject_id,
+            subject["name"],
+            current_user.id,
+            req.topic,
+            limit=max(5, req.count),
+        )
 
     _debug(
         "quiz_generate_local_context_ready",
         subject_name=subject["name"],
         local_context_count=len(local_context),
         local_context_preview=[
-            {"filename": item["filename"], "score": item["score"], "excerpt": item["excerpt"][:120]}
+            {
+                "filename": item["filename"],
+                "source_type": item.get("source_type"),
+                "score": item["score"],
+                "excerpt": item["excerpt"][:120],
+            }
             for item in local_context[:3]
         ],
     )
@@ -1316,7 +2106,12 @@ async def generate_quiz(req: QuizGenerateRequest, current_user: UserInDB = Depen
     now = _now()
     title = f"{subject['name']} - {req.topic} 练习"
     local_sources = [
-        {"document_id": item["document_id"], "filename": item["filename"], "excerpt": item["excerpt"][:180]}
+        {
+            "document_id": item["document_id"],
+            "filename": item["filename"],
+            "source_type": item.get("source_type", "user_upload"),
+            "excerpt": item["excerpt"][:180],
+        }
         for item in local_context[:5]
     ]
 

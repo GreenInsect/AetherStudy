@@ -1,16 +1,44 @@
 import { useState, useEffect } from 'react'
-import { Shield, Search, Trash2, ToggleLeft, ToggleRight, Users, RefreshCw, AlertCircle } from 'lucide-react'
+import {
+  AlertCircle,
+  Database,
+  FileText,
+  FolderOpen,
+  RefreshCw,
+  Search,
+  Shield,
+  Trash2,
+  ToggleLeft,
+  ToggleRight,
+  Upload,
+  Users,
+} from 'lucide-react'
 import { useAppStore } from '../store'
-import { apiListUsers, apiToggleUserStatus, apiAdminDeleteUser } from '../api'
+import {
+  apiAdminDeleteUser,
+  apiDeleteAdminKnowledge,
+  apiListAdminKnowledge,
+  apiListUsers,
+  apiReindexAdminKnowledge,
+  apiToggleUserStatus,
+  apiUploadAdminKnowledge,
+} from '../api'
 
 export default function AdminPage() {
   const { user: currentUser } = useAppStore()
+  const [activeTab, setActiveTab] = useState('knowledge')
   const [users, setUsers] = useState([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [error, setError] = useState('')
   const [actionLoading, setActionLoading] = useState(null) // userId of ongoing action
   const [deleteTarget, setDeleteTarget] = useState(null)   // user to confirm delete
+  const [knowledge, setKnowledge] = useState({ root: '', document_count: 0, summary: {}, documents: [] })
+  const [knowledgeLoading, setKnowledgeLoading] = useState(true)
+  const [knowledgeAction, setKnowledgeAction] = useState(null)
+  const [knowledgeSubject, setKnowledgeSubject] = useState('机器学习')
+  const [knowledgeFiles, setKnowledgeFiles] = useState([])
+  const [knowledgeResult, setKnowledgeResult] = useState(null)
 
   const fetchUsers = async () => {
     setLoading(true)
@@ -25,7 +53,23 @@ export default function AdminPage() {
     }
   }
 
-  useEffect(() => { fetchUsers() }, [])
+  const fetchKnowledge = async () => {
+    setKnowledgeLoading(true)
+    setError('')
+    try {
+      const data = await apiListAdminKnowledge()
+      setKnowledge(data || { root: '', document_count: 0, summary: {}, documents: [] })
+    } catch (err) {
+      setError(err.message || '加载管理员知识库失败')
+    } finally {
+      setKnowledgeLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchUsers()
+    fetchKnowledge()
+  }, [])
 
   const filtered = users.filter(u =>
     u.username.toLowerCase().includes(search.toLowerCase()) ||
@@ -57,7 +101,55 @@ export default function AdminPage() {
     }
   }
 
+  const handleKnowledgeUpload = async () => {
+    if (!knowledgeSubject.trim() || knowledgeFiles.length === 0) return
+    setKnowledgeAction('upload')
+    setError('')
+    setKnowledgeResult(null)
+    try {
+      const result = await apiUploadAdminKnowledge(knowledgeSubject.trim(), knowledgeFiles)
+      setKnowledgeResult(result)
+      setKnowledgeFiles([])
+      await fetchKnowledge()
+    } catch (err) {
+      setError(err.message || '上传管理员知识库资料失败')
+    } finally {
+      setKnowledgeAction(null)
+    }
+  }
+
+  const handleKnowledgeReindex = async (force = false) => {
+    setKnowledgeAction(force ? 'force-reindex' : 'reindex')
+    setError('')
+    setKnowledgeResult(null)
+    try {
+      const result = await apiReindexAdminKnowledge(force)
+      setKnowledgeResult(result)
+      await fetchKnowledge()
+    } catch (err) {
+      setError(err.message || '重建管理员知识库索引失败')
+    } finally {
+      setKnowledgeAction(null)
+    }
+  }
+
+  const handleKnowledgeDelete = async (doc) => {
+    if (!window.confirm(`删除管理员知识库资料「${doc.filename}」？删除后将不再参与 RAG。`)) return
+    setKnowledgeAction(`delete-${doc.id}`)
+    setError('')
+    try {
+      await apiDeleteAdminKnowledge(doc.id)
+      await fetchKnowledge()
+    } catch (err) {
+      setError(err.message || '删除管理员知识库资料失败')
+    } finally {
+      setKnowledgeAction(null)
+    }
+  }
+
   const totalActive = users.filter(u => u.is_active).length
+  const knowledgeDocs = knowledge.documents || []
+  const knowledgeSubjects = Object.entries(knowledge.summary || {})
 
   return (
     <div className="admin-page">
@@ -66,16 +158,181 @@ export default function AdminPage() {
         <div className="admin-title">
           <Shield size={22} />
           <div>
-            <h1>用户管理</h1>
-            <p>管理所有注册用户账户</p>
+            <h1>管理员控制台</h1>
+            <p>管理用户账户与服务器端持久知识库</p>
           </div>
         </div>
-        <button className="btn-refresh" onClick={fetchUsers} disabled={loading}>
+        <button
+          className="btn-refresh"
+          onClick={activeTab === 'users' ? fetchUsers : fetchKnowledge}
+          disabled={loading || knowledgeLoading}
+        >
           <RefreshCw size={16} className={loading ? 'spin' : ''} />
           刷新
         </button>
       </div>
 
+      <div className="admin-tabs">
+        <button
+          className={`admin-tab ${activeTab === 'knowledge' ? 'admin-tab--active' : ''}`}
+          onClick={() => setActiveTab('knowledge')}
+        >
+          <Database size={15} />
+          持久知识库
+        </button>
+        <button
+          className={`admin-tab ${activeTab === 'users' ? 'admin-tab--active' : ''}`}
+          onClick={() => setActiveTab('users')}
+        >
+          <Users size={15} />
+          用户管理
+        </button>
+      </div>
+
+      {error && (
+        <div className="auth-error" style={{ marginBottom: 16 }}>
+          <AlertCircle size={15} /><span>{error}</span>
+        </div>
+      )}
+
+      {activeTab === 'knowledge' && (
+        <>
+          <div className="admin-stats-row">
+            <div className="admin-stat-card">
+              <Database size={18} />
+              <div>
+                <div className="stat-num">{knowledge.document_count || 0}</div>
+                <div className="stat-lbl">持久资料数</div>
+              </div>
+            </div>
+            <div className="admin-stat-card">
+              <FolderOpen size={18} />
+              <div>
+                <div className="stat-num">{knowledgeSubjects.length}</div>
+                <div className="stat-lbl">学科目录数</div>
+              </div>
+            </div>
+            <div className="admin-stat-card admin-stat-card--wide">
+              <FileText size={18} />
+              <div>
+                <div className="stat-num admin-root-path">{knowledge.root || 'backend/storage/admin_knowledge'}</div>
+                <div className="stat-lbl">服务器知识库目录</div>
+              </div>
+            </div>
+          </div>
+
+          <section className="admin-knowledge-panel">
+            <div className="admin-knowledge-form">
+              <div className="form-field">
+                <label>学科目录名</label>
+                <input
+                  className="form-input"
+                  value={knowledgeSubject}
+                  onChange={e => setKnowledgeSubject(e.target.value)}
+                  placeholder="例如：机器学习、深度学习、概率论"
+                />
+              </div>
+              <div className="form-field">
+                <label>资料文件</label>
+                <label className="admin-file-picker">
+                  <Upload size={16} />
+                  <span>{knowledgeFiles.length ? `已选择 ${knowledgeFiles.length} 个文件` : '选择 md / txt / PDF'}</span>
+                  <input
+                    type="file"
+                    multiple
+                    accept=".md,.markdown,.txt,.pdf"
+                    onChange={e => setKnowledgeFiles(Array.from(e.target.files || []))}
+                  />
+                </label>
+              </div>
+              <button
+                className="btn-study-primary"
+                onClick={handleKnowledgeUpload}
+                disabled={!knowledgeSubject.trim() || knowledgeFiles.length === 0 || knowledgeAction === 'upload'}
+              >
+                {knowledgeAction === 'upload' ? <RefreshCw size={16} className="spin" /> : <Upload size={16} />}
+                上传并索引
+              </button>
+            </div>
+            <p className="admin-kb-hint">
+              上传后会保存到 <strong>{knowledge.root || 'backend/storage/admin_knowledge'}/学科名/文件名</strong>，一级目录名作为 subject_name，并立即构建向量库。
+            </p>
+            <div className="admin-knowledge-actions">
+              <button className="btn-study-secondary" onClick={() => handleKnowledgeReindex(false)} disabled={Boolean(knowledgeAction)}>
+                <RefreshCw size={15} className={knowledgeAction === 'reindex' ? 'spin' : ''} />
+                扫描目录增量索引
+              </button>
+              <button className="btn-study-secondary" onClick={() => handleKnowledgeReindex(true)} disabled={Boolean(knowledgeAction)}>
+                <RefreshCw size={15} className={knowledgeAction === 'force-reindex' ? 'spin' : ''} />
+                强制重建全部索引
+              </button>
+            </div>
+            {knowledgeResult && (
+              <pre className="admin-kb-result">{JSON.stringify(knowledgeResult.status_counts || knowledgeResult, null, 2)}</pre>
+            )}
+          </section>
+
+          <div className="admin-table-wrap">
+            {knowledgeLoading ? (
+              <div className="admin-loading">
+                <RefreshCw size={24} className="spin" />
+                <span>加载知识库...</span>
+              </div>
+            ) : knowledgeDocs.length === 0 ? (
+              <div className="admin-empty">
+                <Database size={36} />
+                <p>暂无管理员持久资料</p>
+              </div>
+            ) : (
+              <table className="admin-table">
+                <thead>
+                  <tr>
+                    <th>学科</th>
+                    <th>文件名</th>
+                    <th>类型</th>
+                    <th>字符数</th>
+                    <th>Chunks</th>
+                    <th>向量</th>
+                    <th>更新时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {knowledgeDocs.map(doc => (
+                    <tr key={doc.id}>
+                      <td><span className="admin-badge"><FolderOpen size={12} /> {doc.subject_name}</span></td>
+                      <td className="email-cell">{doc.filename}</td>
+                      <td>{doc.file_type}</td>
+                      <td>{doc.char_count}</td>
+                      <td>{doc.chunk_count}</td>
+                      <td>
+                        <span className={`status-badge ${doc.embedding_provider === 'dashscope' ? 'active' : 'inactive'}`}>
+                          {doc.embedding_provider === 'dashscope' ? '百炼' : '轻量'}
+                        </span>
+                        <div className="admin-kb-model">{doc.embedding_model}</div>
+                      </td>
+                      <td className="date-cell">{new Date(doc.updated_at).toLocaleString('zh-CN')}</td>
+                      <td>
+                        <button
+                          className="btn-icon-action btn-red"
+                          title="删除资料"
+                          disabled={knowledgeAction === `delete-${doc.id}`}
+                          onClick={() => handleKnowledgeDelete(doc)}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
+
+      {activeTab === 'users' && (
+        <>
       {/* 统计行 */}
       <div className="admin-stats-row">
         <div className="admin-stat-card">
@@ -111,12 +368,6 @@ export default function AdminPage() {
           onChange={e => setSearch(e.target.value)}
         />
       </div>
-
-      {error && (
-        <div className="auth-error" style={{ marginBottom: 16 }}>
-          <AlertCircle size={15} /><span>{error}</span>
-        </div>
-      )}
 
       {/* 用户表格 */}
       <div className="admin-table-wrap">
@@ -201,6 +452,8 @@ export default function AdminPage() {
           </table>
         )}
       </div>
+        </>
+      )}
 
       {/* 删除确认弹窗 */}
       {deleteTarget && (

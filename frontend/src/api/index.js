@@ -168,6 +168,50 @@ export async function apiAdminDeleteUser(userId) {
   return data
 }
 
+export async function apiListAdminKnowledge() {
+  const res = await apiFetch('/study/admin/knowledge')
+  const data = await res?.json()
+  if (!res?.ok) throw new Error(formatApiError(data?.detail, '加载管理员知识库失败'))
+  return data
+}
+
+export async function apiUploadAdminKnowledge(subjectName, files) {
+  const form = new FormData()
+  form.append('subject_name', subjectName)
+  Array.from(files || []).forEach(file => form.append('files', file))
+  const res = await fetch(`${BASE_URL}/study/admin/knowledge/upload`, {
+    method: 'POST',
+    headers: bearerHeaders(),
+    body: form,
+  })
+  if (res.status === 401) {
+    localStorage.removeItem('AetherStudy_token')
+    localStorage.removeItem('AetherStudy_user')
+    window.location.href = '/login'
+    return
+  }
+  const data = await res.json()
+  if (!res.ok) throw new Error(formatApiError(data?.detail, '上传管理员知识库资料失败'))
+  return data
+}
+
+export async function apiReindexAdminKnowledge(force = false) {
+  const res = await apiFetch('/study/admin/knowledge/reindex', {
+    method: 'POST',
+    body: JSON.stringify({ force }),
+  })
+  const data = await res?.json()
+  if (!res?.ok) throw new Error(formatApiError(data?.detail, '重建管理员知识库索引失败'))
+  return data
+}
+
+export async function apiDeleteAdminKnowledge(documentId) {
+  const res = await apiFetch(`/study/admin/knowledge/${documentId}`, { method: 'DELETE' })
+  const data = await res?.json()
+  if (!res?.ok) throw new Error(formatApiError(data?.detail, '删除管理员知识库资料失败'))
+  return data
+}
+
 // ===== 对话 API =====
 
 export async function* streamChat(userId, messages, mode = 'general', profileContext = null) {

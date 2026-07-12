@@ -13,9 +13,10 @@
 """
 
 import json
+import traceback
 import uuid
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -25,6 +26,7 @@ from database.db import get_db
 from models.user import UserInDB
 from services.auth_service import get_current_user
 from services.llm_settings import complete_llm_json, get_user_llm_settings, stream_llm_text
+from routers.study import retrieve_admin_knowledge_context
 
 router = APIRouter()
 
@@ -71,6 +73,35 @@ class ChatRequest(BaseModel):
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _chat_rag_debug(step: str, **data: Any) -> None:
+    safe_data = json.dumps(data, ensure_ascii=False, default=str)
+    if len(safe_data) > 4000:
+        safe_data = safe_data[:4000] + "...<truncated>"
+    print(f"[AetherStudy:RAG DEBUG] chat_{step} | {safe_data}", flush=True)
+
+
+def _chat_rag_debug_exception(step: str, exc: Exception, **data: Any) -> None:
+    _chat_rag_debug(
+        step,
+        error_type=type(exc).__name__,
+        error=str(exc),
+        traceback=traceback.format_exc(limit=3),
+        **data,
+    )
+
+
+def _format_admin_knowledge_context(context: List[Dict[str, Any]]) -> str:
+    if not context:
+        return ""
+    parts = []
+    for index, item in enumerate(context, 1):
+        parts.append(
+            f"[{index}] 来源={item.get('filename')}；主题={item.get('subject_name') or '管理员知识库'}；"
+            f"内容={item.get('excerpt', '')[:700]}"
+        )
+    return "\n".join(parts)
 
 
 def _get_session_or_404(conn, session_id: str, user_id: str):
@@ -227,6 +258,36 @@ async def chat_stream(req: ChatRequest, current_user: UserInDB = Depends(get_cur
     async def event_stream():
         # --- 构造 System Prompt ---
         system_content = "你是一个专业的 AI 学习助手 AetherStudy。"
+        settings = get_user_llm_settings(current_user.id)
+        admin_knowledge_context: List[Dict[str, Any]] = []
+        try:
+            admin_knowledge_context = await retrieve_admin_knowledge_context(settings, req.content, subject_name="all", limit=4)
+            _chat_rag_debug(
+                "admin_knowledge_context_ready",
+                user_id=current_user.id,
+                session_id=req.session_id,
+                context_count=len(admin_knowledge_context),
+                sources=[
+                    {"filename": item.get("filename"), "score": item.get("score"), "excerpt": item.get("excerpt", "")[:120]}
+                    for item in admin_knowledge_context
+                ],
+            )
+        except Exception as exc:
+            _chat_rag_debug_exception(
+                "admin_knowledge_context_failed_continue_without_rag",
+                exc,
+                user_id=current_user.id,
+                session_id=req.session_id,
+            )
+
+        admin_knowledge_text = _format_admin_knowledge_context(admin_knowledge_context)
+        if admin_knowledge_text:
+            system_content += (
+                "\n\n[管理员持久知识库检索结果]\n"
+                f"{admin_knowledge_text}\n"
+                "请优先结合这些服务器端持久资料回答；如果资料不足，再明确说明需要补充材料。"
+            )
+
         if req.mode == "profile_building":
             system_content += "当前任务：引导用户建立学习画像。请了解其专业、薄弱点、目标及偏好。"
         else:
@@ -237,7 +298,6 @@ async def chat_stream(req: ChatRequest, current_user: UserInDB = Depends(get_cur
             messages.append({"role": row["role"], "content": row["content"]})
 
         full_content = ""
-        settings = get_user_llm_settings(current_user.id)
 
         # --- 调用用户配置的 OpenAI 兼容 API ---
         try:
