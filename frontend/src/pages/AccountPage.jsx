@@ -1,12 +1,102 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Settings, Key, Trash2, User, Eye, EyeOff, AlertCircle, CheckCircle2, Shield } from 'lucide-react'
+import { Settings, Key, Trash2, User, Eye, EyeOff, AlertCircle, CheckCircle2, Shield, Cpu } from 'lucide-react'
 import { useAppStore } from '../store'
-import { apiUpdateMe, apiChangePassword, apiDeleteMe, apiLogout } from '../api'
+import {
+  apiUpdateMe,
+  apiChangePassword,
+  apiDeleteMe,
+  apiLogout,
+  apiGetLLMSettings,
+  apiUpdateLLMSettings,
+} from '../api'
+
+const DEFAULT_LLM_FORM = {
+  provider: 'OpenAI',
+  model: 'gpt-5.4',
+  review_model: 'gpt-5.5',
+  base_url: 'https://api.dstopology.com/v1',
+  api_key: '',
+  wire_api: 'responses',
+  reasoning_effort: 'xhigh',
+  disable_response_storage: true,
+  network_access: 'enabled',
+  context_window: 400000,
+  auto_compact_token_limit: 360000,
+}
 
 export default function AccountPage() {
   const navigate = useNavigate()
   const { user, setAuth, clearAuth } = useAppStore()
+
+  const [llmForm, setLlmForm] = useState(DEFAULT_LLM_FORM)
+  const [llmHasKey, setLlmHasKey] = useState(false)
+  const [llmLoading, setLlmLoading] = useState(false)
+  const [llmMsg, setLlmMsg] = useState(null)
+
+  useEffect(() => {
+    let mounted = true
+    apiGetLLMSettings()
+      .then(settings => {
+        if (!mounted) return
+        setLlmHasKey(Boolean(settings.has_api_key))
+        setLlmForm({
+          provider: settings.provider || DEFAULT_LLM_FORM.provider,
+          model: settings.model || DEFAULT_LLM_FORM.model,
+          review_model: settings.review_model || DEFAULT_LLM_FORM.review_model,
+          base_url: settings.base_url || DEFAULT_LLM_FORM.base_url,
+          api_key: '',
+          wire_api: settings.wire_api || DEFAULT_LLM_FORM.wire_api,
+          reasoning_effort: settings.reasoning_effort || DEFAULT_LLM_FORM.reasoning_effort,
+          disable_response_storage: Boolean(settings.disable_response_storage),
+          network_access: settings.network_access || DEFAULT_LLM_FORM.network_access,
+          context_window: settings.context_window || DEFAULT_LLM_FORM.context_window,
+          auto_compact_token_limit: settings.auto_compact_token_limit || DEFAULT_LLM_FORM.auto_compact_token_limit,
+        })
+      })
+      .catch(err => {
+        if (mounted) setLlmMsg({ type: 'error', text: err.message })
+      })
+    return () => { mounted = false }
+  }, [])
+
+  const handleUpdateLLM = async (e) => {
+    e.preventDefault()
+    setLlmLoading(true)
+    setLlmMsg(null)
+    try {
+      const payload = {
+        ...llmForm,
+        context_window: Number(llmForm.context_window),
+        auto_compact_token_limit: Number(llmForm.auto_compact_token_limit),
+      }
+      if (!payload.api_key.trim()) delete payload.api_key
+      const updated = await apiUpdateLLMSettings(payload)
+      setLlmHasKey(Boolean(updated.has_api_key))
+      setLlmForm(f => ({ ...f, api_key: '' }))
+      setLlmMsg({ type: 'success', text: '模型配置已保存' })
+    } catch (err) {
+      setLlmMsg({ type: 'error', text: err.message })
+    } finally {
+      setLlmLoading(false)
+    }
+  }
+
+  const applyCodexPreset = () => {
+    setLlmForm(f => ({
+      ...f,
+      provider: 'OpenAI',
+      model: 'gpt-5.4',
+      review_model: 'gpt-5.5',
+      base_url: 'https://api.dstopology.com/v1',
+      wire_api: 'responses',
+      reasoning_effort: 'xhigh',
+      disable_response_storage: true,
+      network_access: 'enabled',
+      context_window: 400000,
+      auto_compact_token_limit: 360000,
+    }))
+  }
 
   // 基本信息编辑
   const [infoForm, setInfoForm] = useState({ username: user?.username || '', email: user?.email || '' })
@@ -160,6 +250,166 @@ export default function AccountPage() {
               </div>
             )}
           </div>
+        </div>
+
+        {/* ── 模型配置 ── */}
+        <div className="account-card">
+          <div className="account-card-title">
+            <Cpu size={18} />
+            <span>模型配置</span>
+          </div>
+
+          <form className="account-form" onSubmit={handleUpdateLLM}>
+            <div className="llm-status-row">
+              <span className={`llm-key-badge ${llmHasKey ? 'ok' : 'warn'}`}>
+                {llmHasKey ? '已配置 API Key' : '未配置 API Key'}
+              </span>
+              <button type="button" className="btn-cancel" onClick={applyCodexPreset}>
+                使用 Codex 配置预设
+              </button>
+            </div>
+
+            <div className="form-row">
+              <div className="form-group">
+                <label>Provider</label>
+                <input
+                  className="auth-input"
+                  value={llmForm.provider}
+                  onChange={e => setLlmForm(f => ({ ...f, provider: e.target.value }))}
+                  placeholder="OpenAI"
+                />
+              </div>
+              <div className="form-group">
+                <label>Wire API</label>
+                <select
+                  className="auth-input"
+                  value={llmForm.wire_api}
+                  onChange={e => setLlmForm(f => ({ ...f, wire_api: e.target.value }))}
+                >
+                  <option value="responses">Responses API</option>
+                  <option value="chat_completions">Chat Completions</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="form-group">
+              <label>BASE_URL</label>
+              <input
+                className="auth-input"
+                value={llmForm.base_url}
+                onChange={e => setLlmForm(f => ({ ...f, base_url: e.target.value }))}
+                placeholder="https://api.dstopology.com/v1"
+              />
+            </div>
+
+            <div className="form-group">
+              <label>OPENAI_API_KEY</label>
+              <div className="pwd-input-wrap">
+                <input
+                  className="auth-input"
+                  type={showPwd.llm ? 'text' : 'password'}
+                  value={llmForm.api_key}
+                  onChange={e => setLlmForm(f => ({ ...f, api_key: e.target.value }))}
+                  placeholder={llmHasKey ? '留空则保留已保存的 Key' : '输入 sk-...'}
+                  autoComplete="off"
+                />
+                <button type="button" className="pwd-toggle" onClick={() => togglePwd('llm')}>
+                  {showPwd.llm ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+            </div>
+
+            <div className="form-row">
+              <div className="form-group">
+                <label>主模型 model</label>
+                <input
+                  className="auth-input"
+                  value={llmForm.model}
+                  onChange={e => setLlmForm(f => ({ ...f, model: e.target.value }))}
+                  placeholder="gpt-5.4"
+                />
+              </div>
+              <div className="form-group">
+                <label>结构化/评审模型 review_model</label>
+                <input
+                  className="auth-input"
+                  value={llmForm.review_model}
+                  onChange={e => setLlmForm(f => ({ ...f, review_model: e.target.value }))}
+                  placeholder="gpt-5.5"
+                />
+              </div>
+            </div>
+
+            <div className="form-row">
+              <div className="form-group">
+                <label>Reasoning Effort</label>
+                <input
+                  className="auth-input"
+                  value={llmForm.reasoning_effort}
+                  onChange={e => setLlmForm(f => ({ ...f, reasoning_effort: e.target.value }))}
+                  placeholder="xhigh"
+                />
+              </div>
+              <div className="form-group">
+                <label>Network Access</label>
+                <select
+                  className="auth-input"
+                  value={llmForm.network_access}
+                  onChange={e => setLlmForm(f => ({ ...f, network_access: e.target.value }))}
+                >
+                  <option value="enabled">enabled</option>
+                  <option value="disabled">disabled</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="form-row">
+              <div className="form-group">
+                <label>Context Window</label>
+                <input
+                  className="auth-input"
+                  type="number"
+                  min="1000"
+                  value={llmForm.context_window}
+                  onChange={e => setLlmForm(f => ({ ...f, context_window: e.target.value }))}
+                />
+              </div>
+              <div className="form-group">
+                <label>Auto Compact Token Limit</label>
+                <input
+                  className="auth-input"
+                  type="number"
+                  min="1000"
+                  value={llmForm.auto_compact_token_limit}
+                  onChange={e => setLlmForm(f => ({ ...f, auto_compact_token_limit: e.target.value }))}
+                />
+              </div>
+            </div>
+
+            <label className="llm-check-row">
+              <input
+                type="checkbox"
+                checked={llmForm.disable_response_storage}
+                onChange={e => setLlmForm(f => ({ ...f, disable_response_storage: e.target.checked }))}
+              />
+              <span>禁用响应存储 store=false</span>
+            </label>
+
+            {llmMsg && (
+              <div className={`account-msg account-msg--${llmMsg.type}`}>
+                {llmMsg.type === 'success' ? <CheckCircle2 size={15} /> : <AlertCircle size={15} />}
+                {llmMsg.text}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              className="btn-account-save"
+              disabled={llmLoading || !llmForm.model || !llmForm.base_url}
+            >
+              {llmLoading ? '保存中...' : '保存模型配置'}
+            </button>
+          </form>
         </div>
 
         {/* ── 修改密码 ── */}

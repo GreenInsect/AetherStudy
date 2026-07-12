@@ -85,6 +85,26 @@ def init_db():
             );
 
             -- ============================================================
+            -- 用户 LLM 配置（用户端动态配置模型与 API）
+            -- ============================================================
+            CREATE TABLE IF NOT EXISTS user_llm_settings (
+                user_id       TEXT PRIMARY KEY,
+                provider      TEXT NOT NULL DEFAULT 'OpenAI',
+                model         TEXT NOT NULL DEFAULT 'gpt-5.4',
+                review_model  TEXT NOT NULL DEFAULT 'gpt-5.5',
+                base_url      TEXT NOT NULL DEFAULT 'https://api.dstopology.com/v1',
+                api_key       TEXT NOT NULL DEFAULT '',
+                wire_api      TEXT NOT NULL DEFAULT 'responses',
+                reasoning_effort TEXT NOT NULL DEFAULT 'xhigh',
+                disable_response_storage INTEGER NOT NULL DEFAULT 1,
+                network_access TEXT NOT NULL DEFAULT 'enabled',
+                context_window INTEGER NOT NULL DEFAULT 400000,
+                auto_compact_token_limit INTEGER NOT NULL DEFAULT 360000,
+                updated_at    TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            -- ============================================================
             -- 学习路径表
             -- ============================================================
             CREATE TABLE IF NOT EXISTS learning_paths (
@@ -107,6 +127,85 @@ def init_db():
                 report_json TEXT NOT NULL DEFAULT '{}',
                 created_at  TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            -- ============================================================
+            -- 学科与本地资料库（RAG 文档来源）
+            -- ============================================================
+            CREATE TABLE IF NOT EXISTS study_subjects (
+                id          TEXT PRIMARY KEY,
+                user_id     TEXT NOT NULL,
+                name        TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                UNIQUE(user_id, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS study_documents (
+                id          TEXT PRIMARY KEY,
+                subject_id  TEXT NOT NULL,
+                user_id     TEXT NOT NULL,
+                filename    TEXT NOT NULL,
+                file_type   TEXT NOT NULL,
+                char_count  INTEGER NOT NULL DEFAULT 0,
+                content     TEXT NOT NULL,
+                storage_path TEXT NOT NULL DEFAULT '',
+                stored_filename TEXT NOT NULL DEFAULT '',
+                chunk_count INTEGER NOT NULL DEFAULT 0,
+                vector_index_ready INTEGER NOT NULL DEFAULT 0,
+                created_at  TEXT NOT NULL,
+                FOREIGN KEY (subject_id) REFERENCES study_subjects(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS study_document_chunks (
+                id          TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                subject_id  TEXT NOT NULL,
+                user_id     TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                content     TEXT NOT NULL,
+                embedding_json TEXT NOT NULL DEFAULT '{}',
+                token_count INTEGER NOT NULL DEFAULT 0,
+                created_at  TEXT NOT NULL,
+                FOREIGN KEY (document_id) REFERENCES study_documents(id) ON DELETE CASCADE,
+                FOREIGN KEY (subject_id) REFERENCES study_subjects(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            -- ============================================================
+            -- 本地题库历史
+            -- ============================================================
+            CREATE TABLE IF NOT EXISTS quiz_sets (
+                id             TEXT PRIMARY KEY,
+                user_id        TEXT NOT NULL,
+                subject_id     TEXT NOT NULL,
+                title          TEXT NOT NULL,
+                topic          TEXT NOT NULL,
+                question_type  TEXT NOT NULL,
+                count          INTEGER NOT NULL,
+                difficulty     TEXT NOT NULL,
+                local_sources  TEXT NOT NULL DEFAULT '[]',
+                web_sources    TEXT NOT NULL DEFAULT '[]',
+                created_at     TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (subject_id) REFERENCES study_subjects(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS quiz_questions (
+                id             TEXT PRIMARY KEY,
+                quiz_set_id    TEXT NOT NULL,
+                seq_no         INTEGER NOT NULL,
+                question_type  TEXT NOT NULL,
+                prompt         TEXT NOT NULL,
+                options_json   TEXT NOT NULL DEFAULT '[]',
+                answer_json    TEXT NOT NULL DEFAULT 'null',
+                explanation    TEXT NOT NULL DEFAULT '',
+                local_citation TEXT NOT NULL DEFAULT '',
+                web_citation   TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (quiz_set_id) REFERENCES quiz_sets(id) ON DELETE CASCADE
             );
             -- 聊天会话表
             CREATE TABLE IF NOT EXISTS chat_sessions (
@@ -135,11 +234,32 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_users_email    ON users(email);
             CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
             CREATE INDEX IF NOT EXISTS idx_revoked_tokens_user  ON revoked_tokens(user_id);
+            CREATE INDEX IF NOT EXISTS idx_user_llm_settings_user ON user_llm_settings(user_id);
             CREATE INDEX IF NOT EXISTS idx_learning_paths_user  ON learning_paths(user_id);
             CREATE INDEX IF NOT EXISTS idx_assessments_user     ON assessment_records(user_id);
+            CREATE INDEX IF NOT EXISTS idx_subjects_user        ON study_subjects(user_id);
+            CREATE INDEX IF NOT EXISTS idx_documents_subject    ON study_documents(subject_id);
+            CREATE INDEX IF NOT EXISTS idx_document_chunks_doc  ON study_document_chunks(document_id);
+            CREATE INDEX IF NOT EXISTS idx_document_chunks_subject ON study_document_chunks(subject_id);
+            CREATE INDEX IF NOT EXISTS idx_quiz_sets_user       ON quiz_sets(user_id);
+            CREATE INDEX IF NOT EXISTS idx_quiz_sets_subject    ON quiz_sets(subject_id);
+            CREATE INDEX IF NOT EXISTS idx_quiz_questions_set   ON quiz_questions(quiz_set_id);
             CREATE INDEX IF NOT EXISTS idx_chat_sessions_user   ON chat_sessions(user_id);
             CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated ON chat_sessions(updated_at);
             CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id);
             CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at);
         """)
+
+        # 兼容已存在的本地数据库：CREATE TABLE IF NOT EXISTS 不会自动补列。
+        existing_document_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(study_documents)").fetchall()
+        }
+        for column_name, column_sql in {
+            "storage_path": "TEXT NOT NULL DEFAULT ''",
+            "stored_filename": "TEXT NOT NULL DEFAULT ''",
+            "chunk_count": "INTEGER NOT NULL DEFAULT 0",
+            "vector_index_ready": "INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            if column_name not in existing_document_columns:
+                conn.execute(f"ALTER TABLE study_documents ADD COLUMN {column_name} {column_sql}")
     print(f"[DB] 数据库初始化完成: {DB_PATH}")

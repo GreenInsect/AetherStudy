@@ -7,13 +7,23 @@ AetherStudy AI - 智能学习助手系统后端
     pip install passlib[bcrypt] python-jose[cryptography]
 
 运行：
-    uvicorn main:app --host 0.0.0.0 --port 5000 --reload
+    uvicorn main:app --host 0.0.0.0 --port 9500 --reload
 """
+import sys
+import bcrypt
 
+if not hasattr(bcrypt, "__about__"):
+    class FakeAbout:
+        __version__ = bcrypt.__version__
+    bcrypt.__about__ = FakeAbout()
+
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from database.db import init_db
-from routers import chat, profile, resources, learning_path, assessment, auth
+from routers import chat, profile, resources, learning_path, assessment, auth, study
+
+load_dotenv()
 
 app = FastAPI(
     title="AetherStudy AI",
@@ -37,6 +47,7 @@ app.include_router(profile.router,       prefix="/api/profile",       tags=["学
 app.include_router(resources.router,     prefix="/api/resources",     tags=["资源生成"])
 app.include_router(learning_path.router, prefix="/api/learning-path", tags=["学习路径"])
 app.include_router(assessment.router,    prefix="/api/assessment",    tags=["学习评估"])
+app.include_router(study.router,         prefix="/api/study",         tags=["学科题库"])
 
 
 @app.on_event("startup")

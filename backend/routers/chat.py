@@ -12,7 +12,6 @@
   POST   /api/chat/message                   非流式发送消息
 """
 
-import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
@@ -25,18 +24,9 @@ from pydantic import BaseModel
 from database.db import get_db
 from models.user import UserInDB
 from services.auth_service import get_current_user
-from dotenv import load_dotenv
-import os
-from openai import AsyncOpenAI
+from services.llm_settings import complete_llm_json, get_user_llm_settings, stream_llm_text
 
 router = APIRouter()
-load_dotenv()
-api_key = os.getenv("DEEPSEEK_API_KEY")
-base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-client = AsyncOpenAI(
-    api_key=api_key,
-    base_url=base_url
-)
 
 # Pydantic 模型
 
@@ -247,17 +237,11 @@ async def chat_stream(req: ChatRequest, current_user: UserInDB = Depends(get_cur
             messages.append({"role": row["role"], "content": row["content"]})
 
         full_content = ""
-        
-        # --- 调用 DeepSeek 流式 API ---
-        try:
-            response = await client.chat.completions.create(
-                model="deepseek-chat",
-                messages=messages,
-                stream=True
-            )
+        settings = get_user_llm_settings(current_user.id)
 
-            async for chunk in response:
-                delta = chunk.choices[0].delta.content or ""
+        # --- 调用用户配置的 OpenAI 兼容 API ---
+        try:
+            async for delta in stream_llm_text(settings, messages):
                 if delta:
                     full_content += delta
                     yield f"data: {json.dumps({'type': 'delta', 'content': delta}, ensure_ascii=False)}\n\n"
@@ -306,15 +290,13 @@ async def chat_stream(req: ChatRequest, current_user: UserInDB = Depends(get_cur
                             "description": "对用户学习状态的精准深度画像总结或者 null"
                         }}
                         """
-                    extract_res = await client.chat.completions.create(
-                        model="deepseek-chat",
-                        messages=[
+                    extracted = await complete_llm_json(
+                        settings,
+                        [
                             {"role": "system", "content": "You are a helpful assistant that outputs JSON."},
                             {"role": "user", "content": extract_prompt}
-                        ],
-                        response_format={'type': 'json_object'}
+                        ]
                     )
-                    extracted = json.loads(extract_res.choices[0].message.content)
 
                     print(f"[*] klog 提取到的画像特征: {json.dumps(extracted, ensure_ascii=False)}")
                     

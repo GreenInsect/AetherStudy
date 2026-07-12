@@ -56,7 +56,7 @@ AetherStudy/
 ```bash
 cd backend
 pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 5000 --reload
+uvicorn main:app --host 0.0.0.0 --port 9500 --reload
 # API文档：http://localhost:8000/docs
 ```
 

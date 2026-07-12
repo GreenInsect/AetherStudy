@@ -12,7 +12,7 @@ const NAV_ITEMS = [
   { to: '/app/chat',          icon: MessageSquare, label: '智能对话' },
   { to: '/app/resources',     icon: BookOpen,      label: '学习资源' },
   { to: '/app/learning-path', icon: Map,           label: '学习路径' },
-  { to: '/app/assessment',    icon: BarChart2,      label: '学习评估' },
+  { to: '/app/assessment',    icon: BarChart2,      label: '学科题库' },
   { to: '/app/profile',       icon: User,          label: '我的画像' },
 ]
 

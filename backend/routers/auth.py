@@ -21,6 +21,7 @@ from typing import List
 
 from fastapi import APIRouter, HTTPException, Depends, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, Field
 
 from database.db import get_db
 from models.user import (
@@ -31,9 +32,28 @@ from services.auth_service import (
     hash_password, verify_password, create_access_token, decode_token,
     revoke_token, get_current_user, get_current_admin, get_user_by_identifier
 )
+from services.llm_settings import (
+    get_user_llm_settings,
+    public_llm_settings,
+    save_user_llm_settings,
+)
 
 router = APIRouter()
 bearer_scheme = HTTPBearer(auto_error=False)
+
+
+class LLMSettingsRequest(BaseModel):
+    provider: str = Field("OpenAI", max_length=40)
+    model: str = Field("gpt-5.4", min_length=1, max_length=80)
+    review_model: str = Field("gpt-5.5", min_length=1, max_length=80)
+    base_url: str = Field("https://api.dstopology.com/v1", min_length=1, max_length=300)
+    api_key: str | None = Field(None, max_length=300)
+    wire_api: str = Field("responses", max_length=40)
+    reasoning_effort: str = Field("xhigh", max_length=40)
+    disable_response_storage: bool = True
+    network_access: str = Field("enabled", max_length=40)
+    context_window: int = Field(400000, ge=1000, le=2000000)
+    auto_compact_token_limit: int = Field(360000, ge=1000, le=2000000)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -200,6 +220,25 @@ async def change_password(
             (hash_password(req.new_password), now, current_user.id)
         )
     return MessageResponse(message="密码修改成功，请重新登录")
+
+
+@router.get("/me/llm-settings")
+async def get_my_llm_settings(current_user: UserInDB = Depends(get_current_user)):
+    """获取当前用户的 LLM 配置。API Key 只返回是否已配置，不回显明文。"""
+    return public_llm_settings(get_user_llm_settings(current_user.id))
+
+
+@router.patch("/me/llm-settings")
+async def update_my_llm_settings(
+    req: LLMSettingsRequest,
+    current_user: UserInDB = Depends(get_current_user)
+):
+    """更新当前用户的 OpenAI 兼容模型配置。api_key 留空时保留旧值。"""
+    payload = req.model_dump()
+    if payload.get("api_key") == "":
+        payload["api_key"] = None
+    settings = save_user_llm_settings(current_user.id, payload)
+    return public_llm_settings(settings)
 
 
 @router.delete("/me", response_model=MessageResponse)

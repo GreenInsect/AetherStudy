@@ -3,4 +3,5 @@ node_modules
 __pycache__
 *.pyc
 AetherStudy.db
+backend/storage/
 tmp*

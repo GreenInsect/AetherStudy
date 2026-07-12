@@ -2,24 +2,24 @@
 认证服务层
 
 职责：
-  1. 密码哈希与验证（使用 bcrypt）
+  1. 密码哈希与验证（使用原生 bcrypt）
   2. JWT Token 生成与验证
   3. 当前用户依赖注入（FastAPI Depends）
   4. Token 吊销检查（退出登录）
 
 依赖安装：
-    pip install passlib[bcrypt] python-jose[cryptography]
+    pip install bcrypt python-jose[cryptography]
 """
 
 import os
 import uuid
+import bcrypt  # <-- 1. 改为导入原生 bcrypt 库
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from database.db import get_db
 from models.user import UserInDB
@@ -29,8 +29,7 @@ SECRET_KEY = os.getenv("JWT_SECRET_KEY", "AetherStudy-dev-secret-key-change-in-p
 ALGORITHM  = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "1440"))  # 默认 24 小时
 
-# 密码哈希上下文（bcrypt 自动加盐）
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# <-- 2. 删除了原有的 pwd_context = CryptContext(...) 行
 
 # HTTP Bearer Token 提取器
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -39,13 +38,25 @@ bearer_scheme = HTTPBearer(auto_error=False)
 # 密码工具
 
 def hash_password(plain_password: str) -> str:
-    """将明文密码哈希为 bcrypt 字符串"""
-    return pwd_context.hash(plain_password)
+    """将明文密码哈希为 bcrypt 字符串（改用原生 bcrypt）"""
+    # 将字符串转为字节流
+    pwd_bytes = plain_password.encode('utf-8')
+    # 生成随机盐并计算哈希值
+    salt = bcrypt.gensalt()
+    hashed_bytes = bcrypt.hashpw(pwd_bytes, salt)
+    # 转换为字符串用于数据库存储
+    return hashed_bytes.decode('utf-8')
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """校验明文密码与哈希是否匹配"""
-    return pwd_context.verify(plain_password, hashed_password)
+    """校验明文密码与哈希是否匹配（改用原生 bcrypt）"""
+    try:
+        pwd_bytes = plain_password.encode('utf-8')
+        hashed_bytes = hashed_password.encode('utf-8')
+        # 使用 checkpw 安全对比
+        return bcrypt.checkpw(pwd_bytes, hashed_bytes)
+    except Exception:
+        return False
 
 
 #  JWT 工具
@@ -54,13 +65,6 @@ def create_access_token(user_id: str, username: str) -> tuple[str, int]:
     """
     生成 JWT access token。
     返回 (token字符串, 过期秒数)。
-
-    Payload 字段：
-      sub  — 用户 ID（subject）
-      usr  — 用户名（方便前端读取）
-      jti  — JWT 唯一 ID（用于吊销）
-      iat  — 签发时间
-      exp  — 过期时间
     """
     jti = str(uuid.uuid4())
     expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -138,7 +142,6 @@ async def get_current_user(
 ) -> UserInDB:
     """
     FastAPI 依赖：从请求头提取并验证 Bearer Token，返回当前用户对象。
-    在需要鉴权的路由中使用：current_user: UserInDB = Depends(get_current_user)
     """
     if not credentials:
         raise HTTPException(
