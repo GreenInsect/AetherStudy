@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import {
   AlertCircle,
+  CheckCircle2,
   Database,
   FileText,
   FolderOpen,
@@ -150,6 +151,9 @@ export default function AdminPage() {
   const totalActive = users.filter(u => u.is_active).length
   const knowledgeDocs = knowledge.documents || []
   const knowledgeSubjects = Object.entries(knowledge.summary || {})
+  const knowledgeResultCounts = knowledgeResult?.status_counts || {}
+  const knowledgeFailedCount = knowledgeResultCounts.failed || 0
+  const knowledgeSuccessCount = (knowledgeResult?.results || []).filter(item => item.status !== 'failed').length
 
   return (
     <div className="admin-page">
@@ -268,7 +272,28 @@ export default function AdminPage() {
               </button>
             </div>
             {knowledgeResult && (
-              <pre className="admin-kb-result">{JSON.stringify(knowledgeResult.status_counts || knowledgeResult, null, 2)}</pre>
+              <div className={`admin-kb-result-panel ${knowledgeFailedCount ? 'admin-kb-result-panel--warn' : 'admin-kb-result-panel--ok'}`}>
+                <div className="admin-kb-result-head">
+                  {knowledgeFailedCount ? <AlertCircle size={16} /> : <CheckCircle2 size={16} />}
+                  <span>
+                    上传完成：成功 {knowledgeSuccessCount} 个，失败 {knowledgeFailedCount} 个
+                  </span>
+                </div>
+                <div className="admin-kb-result-list">
+                  {(knowledgeResult.results || []).map((item, index) => (
+                    <div key={`${item.filename}-${index}`} className="admin-kb-result-item">
+                      <div>
+                        <strong>{item.filename}</strong>
+                        <small>{item.subject_name} · {item.bytes ? `${(item.bytes / 1024 / 1024).toFixed(2)} MB` : '未写入文件'}</small>
+                      </div>
+                      <span className={`admin-kb-result-status ${item.status === 'failed' ? 'failed' : 'success'}`}>
+                        {item.status === 'failed' ? `失败：${item.error || '未知错误'}` : `成功：${item.status}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <pre className="admin-kb-result">{JSON.stringify(knowledgeResult, null, 2)}</pre>
+              </div>
             )}
           </section>
 

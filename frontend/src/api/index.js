@@ -413,6 +413,26 @@ export async function apiGetStudyQuiz(quizId) {
   return data
 }
 
+export async function apiRenameStudyQuiz(quizId, title) {
+  const res = await apiFetch(`/study/quizzes/${quizId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ title }),
+  })
+  const data = await res?.json()
+  if (!res?.ok) throw new Error(formatApiError(data?.detail, '重命名历史题目失败'))
+  return data
+}
+
+export async function apiMergeStudyQuizzes(quizIds, title = '') {
+  const res = await apiFetch('/study/quizzes/merge', {
+    method: 'POST',
+    body: JSON.stringify({ quiz_ids: quizIds, title }),
+  })
+  const data = await res?.json()
+  if (!res?.ok) throw new Error(formatApiError(data?.detail, '合并历史题目失败'))
+  return data
+}
+
 export async function apiDeleteStudyQuiz(quizId) {
   const res = await apiFetch(`/study/quizzes/${quizId}`, {
     method: 'DELETE',

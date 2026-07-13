@@ -10,6 +10,7 @@ AetherStudy AI - 智能学习助手系统后端
     uvicorn main:app --host 0.0.0.0 --port 9500 --reload
 """
 import sys
+import os
 import bcrypt
 
 if not hasattr(bcrypt, "__about__"):
@@ -31,11 +32,19 @@ app = FastAPI(
     version="1.1.0"
 )
 
-# CORS 配置（开发环境）
+def _cors_origins():
+    raw = os.getenv("AETHERSTUDY_CORS_ORIGINS", "")
+    if not raw:
+        return ["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"]
+    values = [item.strip() for item in raw.split(",") if item.strip()]
+    return ["*"] if "*" in values else values
+
+
+# CORS 配置：生产环境请用 AETHERSTUDY_CORS_ORIGINS 配置公网域名/IP
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
-    allow_credentials=True,
+    allow_origins=_cors_origins(),
+    allow_credentials=os.getenv("AETHERSTUDY_CORS_ALLOW_CREDENTIALS", "1").lower() not in {"0", "false", "no", "off"},
     allow_methods=["*"],
     allow_headers=["*"],
 )

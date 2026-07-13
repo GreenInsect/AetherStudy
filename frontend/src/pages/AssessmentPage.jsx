@@ -7,9 +7,11 @@ import {
   Database,
   Eye,
   FileText,
+  GitMerge,
   Globe2,
   History,
   Loader2,
+  Pencil,
   Plus,
   Trash2,
   Upload,
@@ -24,6 +26,8 @@ import {
   apiListStudyQuizzes,
   apiListSubjectDocuments,
   apiListSubjects,
+  apiMergeStudyQuizzes,
+  apiRenameStudyQuiz,
   apiStudyDebugLog,
   apiUploadSubjectDocument,
 } from '../api'
@@ -73,6 +77,7 @@ export default function AssessmentPage() {
   const [documents, setDocuments] = useState([])
   const [history, setHistory] = useState([])
   const [currentQuiz, setCurrentQuiz] = useState(null)
+  const [selectedQuizIds, setSelectedQuizIds] = useState([])
   const [newSubjectName, setNewSubjectName] = useState('')
   const [newSubjectDesc, setNewSubjectDesc] = useState('')
   const [topic, setTopic] = useState('')
@@ -113,6 +118,7 @@ export default function AssessmentPage() {
     if (!subjectId) {
       setDocuments([])
       setHistory([])
+      setSelectedQuizIds([])
       await apiStudyDebugLog('load_subject_data_skipped', { reason: 'empty_subject_id' })
       return
     }
@@ -132,7 +138,9 @@ export default function AssessmentPage() {
       })),
     })
     setDocuments(docsData?.documents || [])
-    setHistory(quizzesData?.quizzes || [])
+    const quizzes = quizzesData?.quizzes || []
+    setHistory(quizzes)
+    setSelectedQuizIds(prev => prev.filter(id => quizzes.some(item => item.id === id)))
   }
 
   useEffect(() => {
@@ -328,6 +336,84 @@ export default function AssessmentPage() {
     }
   }
 
+  const toggleQuizSelection = (quizId) => {
+    setSelectedQuizIds(prev => (
+      prev.includes(quizId) ? prev.filter(id => id !== quizId) : [...prev, quizId]
+    ))
+  }
+
+  const renameQuiz = async (item) => {
+    const nextTitle = window.prompt('请输入新的历史题目名称', item.title)
+    if (nextTitle === null) return
+    const cleanTitle = nextTitle.trim()
+    if (!cleanTitle || cleanTitle === item.title) return
+
+    setBusy(`rename-quiz-${item.id}`)
+    setError('')
+    try {
+      await apiStudyDebugLog('rename_quiz_start', {
+        quizId: item.id,
+        oldTitle: item.title,
+        newTitle: cleanTitle,
+      })
+      const renamed = await apiRenameStudyQuiz(item.id, cleanTitle)
+      await apiStudyDebugLog('rename_quiz_done', {
+        quizId: item.id,
+        newTitle: renamed.title,
+      })
+      if (currentQuiz?.id === item.id) setCurrentQuiz(renamed)
+      await loadSubjectData(selectedSubjectId)
+      await loadSubjects()
+    } catch (e) {
+      await apiStudyDebugLog('rename_quiz_error', {
+        quizId: item.id,
+        message: e.message,
+        stack: e.stack,
+      })
+      setError(e.message || '重命名历史题目失败')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const mergeSelectedQuizzes = async () => {
+    if (selectedQuizIds.length < 2) return
+    const selectedItems = selectedQuizIds
+      .map(id => history.find(item => item.id === id))
+      .filter(Boolean)
+    const defaultTitle = selectedItems[0]?.title || `${selectedSubject?.name || '学科'} - 合并练习`
+    const nextTitle = window.prompt('请输入合并后的历史题目名称', defaultTitle)
+    if (nextTitle === null) return
+    const cleanTitle = nextTitle.trim() || defaultTitle
+
+    setBusy('merge-quizzes')
+    setError('')
+    try {
+      await apiStudyDebugLog('merge_quizzes_start', {
+        quizIds: selectedQuizIds,
+        title: cleanTitle,
+      })
+      const merged = await apiMergeStudyQuizzes(selectedQuizIds, cleanTitle)
+      await apiStudyDebugLog('merge_quizzes_done', {
+        newQuizId: merged.id,
+        questionCount: merged.questions?.length || 0,
+      })
+      setCurrentQuiz(merged)
+      setSelectedQuizIds([])
+      await loadSubjectData(selectedSubjectId)
+      await loadSubjects()
+    } catch (e) {
+      await apiStudyDebugLog('merge_quizzes_error', {
+        quizIds: selectedQuizIds,
+        message: e.message,
+        stack: e.stack,
+      })
+      setError(e.message || '合并历史题目失败')
+    } finally {
+      setBusy('')
+    }
+  }
+
   const canGenerate = selectedSubjectId && topic.trim() && busy !== 'generate'
 
   return (
@@ -514,13 +600,40 @@ export default function AssessmentPage() {
             <History size={18} />
             <span>历史题目</span>
           </div>
+          <div className="history-toolbar">
+            <button
+              type="button"
+              className="btn-study-secondary history-merge-btn"
+              disabled={selectedQuizIds.length < 2 || busy === 'merge-quizzes'}
+              onClick={mergeSelectedQuizzes}
+            >
+              {busy === 'merge-quizzes' ? <Loader2 size={14} className="spin" /> : <GitMerge size={14} />}
+              合并选中 {selectedQuizIds.length >= 2 ? `(${selectedQuizIds.length})` : ''}
+            </button>
+          </div>
           <div className="history-list">
             {history.map(item => (
               <div key={item.id} className="history-item-row">
+                <label className="history-check" title="选择用于合并">
+                  <input
+                    type="checkbox"
+                    checked={selectedQuizIds.includes(item.id)}
+                    onChange={() => toggleQuizSelection(item.id)}
+                  />
+                </label>
                 <button className="history-item history-item-main" onClick={() => openHistory(item.id)}>
                   <span>{item.title}</span>
                   <small>{typeLabel(item.question_type)} · {item.count}题 · {formatTime(item.created_at)}</small>
                   {busy === `history-${item.id}` && <Loader2 size={14} className="spin" />}
+                </button>
+                <button
+                  type="button"
+                  className="study-icon-secondary"
+                  title="重命名历史题目"
+                  disabled={busy === `rename-quiz-${item.id}`}
+                  onClick={() => renameQuiz(item)}
+                >
+                  {busy === `rename-quiz-${item.id}` ? <Loader2 size={13} className="spin" /> : <Pencil size={13} />}
                 </button>
                 <button
                   type="button"

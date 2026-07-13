@@ -307,6 +307,29 @@ def init_db():
             if column_name not in existing_document_columns:
                 conn.execute(f"ALTER TABLE study_documents ADD COLUMN {column_name} {column_sql}")
 
+        conn.execute("UPDATE study_documents SET stored_filename = filename WHERE stored_filename = ''")
+        duplicate_document_groups = conn.execute(
+            """SELECT user_id, subject_id, stored_filename, COUNT(*) AS duplicate_count
+               FROM study_documents
+               GROUP BY user_id, subject_id, stored_filename
+               HAVING duplicate_count > 1"""
+        ).fetchall()
+        for group in duplicate_document_groups:
+            duplicate_rows = conn.execute(
+                """SELECT id
+                   FROM study_documents
+                   WHERE user_id = ? AND subject_id = ? AND stored_filename = ?
+                   ORDER BY created_at DESC""",
+                (group["user_id"], group["subject_id"], group["stored_filename"]),
+            ).fetchall()
+            for duplicate in duplicate_rows[1:]:
+                conn.execute("DELETE FROM study_document_chunks WHERE document_id = ?", (duplicate["id"],))
+                conn.execute("DELETE FROM study_documents WHERE id = ?", (duplicate["id"],))
+        conn.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_unique_filename
+               ON study_documents(user_id, subject_id, stored_filename)"""
+        )
+
         existing_chunk_columns = {
             row["name"] for row in conn.execute("PRAGMA table_info(study_document_chunks)").fetchall()
         }

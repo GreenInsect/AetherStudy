@@ -80,6 +80,15 @@ class QuizGenerateRequest(BaseModel):
     difficulty: str = "medium"
 
 
+class QuizRenameRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=160)
+
+
+class QuizMergeRequest(BaseModel):
+    quiz_ids: List[str] = Field(default_factory=list)
+    title: str = Field("", max_length=160)
+
+
 class FrontendDebugLogRequest(BaseModel):
     step: str = Field(..., min_length=1, max_length=120)
     data: Dict[str, Any] = Field(default_factory=dict)
@@ -939,11 +948,13 @@ async def _index_admin_knowledge_file(settings: LLMSettings, path: Path, force: 
             return result
 
         storage_path = str(path.resolve())
+        was_existing = False
         with get_db() as conn:
             existing = conn.execute(
                 "SELECT * FROM study_admin_documents WHERE storage_path = ?",
                 (storage_path,),
             ).fetchone()
+            was_existing = bool(existing)
             if (
                 existing
                 and not force
@@ -1028,7 +1039,7 @@ async def _index_admin_knowledge_file(settings: LLMSettings, path: Path, force: 
                 )
 
         result.update({
-            "status": "indexed",
+            "status": "updated" if was_existing else "indexed",
             "document_id": doc_id,
             "chunk_count": len(chunks),
             "embedding_mode": embedding_mode,
@@ -1888,7 +1899,21 @@ async def upload_document(
         _debug("document_upload_rejected_short_text", filename=file.filename, text_chars=len(text), preview=text[:180])
         raise HTTPException(status_code=400, detail="资料文本过短，无法用于 RAG 出题")
 
-    doc_id = str(uuid.uuid4())
+    incoming_stored_filename = _safe_filename(file.filename or "document")
+    with get_db() as conn:
+        _get_subject(conn, subject_id, current_user.id)
+        existing_docs = conn.execute(
+            """SELECT id, filename, stored_filename, storage_path
+               FROM study_documents
+               WHERE subject_id = ? AND user_id = ? AND (stored_filename = ? OR filename = ?)
+               ORDER BY created_at DESC""",
+            (subject_id, current_user.id, incoming_stored_filename, file.filename),
+        ).fetchall()
+
+    existing_doc = existing_docs[0] if existing_docs else None
+    duplicate_docs = existing_docs[1:] if len(existing_docs) > 1 else []
+    doc_id = existing_doc["id"] if existing_doc else str(uuid.uuid4())
+    upload_status = "updated" if existing_doc else "created"
     now = _now()
     storage_path, stored_filename = _save_uploaded_file(current_user.id, subject_id, doc_id, file.filename or "document", data)
     chunks = _build_document_chunks(text)
@@ -1904,29 +1929,66 @@ async def upload_document(
         storage_path=storage_path,
         stored_filename=stored_filename,
     )
+    duplicate_storage_paths = [doc["storage_path"] for doc in duplicate_docs if doc["storage_path"]]
     with get_db() as conn:
         _get_subject(conn, subject_id, current_user.id)
-        _debug("document_upload_db_insert_start", document_id=doc_id, subject_id=subject_id, user_id=current_user.id)
-        conn.execute(
-            """INSERT INTO study_documents
-               (id, subject_id, user_id, filename, file_type, char_count, content,
-                storage_path, stored_filename, chunk_count, vector_index_ready, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                doc_id,
-                subject_id,
-                current_user.id,
-                file.filename,
-                ext.lstrip("."),
-                len(text),
-                text,
-                storage_path,
-                stored_filename,
-                len(chunks),
-                1,
-                now,
-            ),
+        _debug(
+            "document_upload_db_write_start",
+            document_id=doc_id,
+            subject_id=subject_id,
+            user_id=current_user.id,
+            status=upload_status,
+            duplicate_cleanup_count=len(duplicate_docs),
         )
+        for duplicate_doc in duplicate_docs:
+            conn.execute("DELETE FROM study_document_chunks WHERE document_id = ?", (duplicate_doc["id"],))
+            conn.execute(
+                "DELETE FROM study_documents WHERE id = ? AND user_id = ?",
+                (duplicate_doc["id"], current_user.id),
+            )
+
+        if existing_doc:
+            conn.execute("DELETE FROM study_document_chunks WHERE document_id = ?", (doc_id,))
+            conn.execute(
+                """UPDATE study_documents
+                   SET filename = ?, file_type = ?, char_count = ?, content = ?,
+                       storage_path = ?, stored_filename = ?, chunk_count = ?,
+                       vector_index_ready = 1, created_at = ?
+                   WHERE id = ? AND user_id = ?""",
+                (
+                    file.filename,
+                    ext.lstrip("."),
+                    len(text),
+                    text,
+                    storage_path,
+                    stored_filename,
+                    len(chunks),
+                    now,
+                    doc_id,
+                    current_user.id,
+                ),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO study_documents
+                   (id, subject_id, user_id, filename, file_type, char_count, content,
+                    storage_path, stored_filename, chunk_count, vector_index_ready, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    doc_id,
+                    subject_id,
+                    current_user.id,
+                    file.filename,
+                    ext.lstrip("."),
+                    len(text),
+                    text,
+                    storage_path,
+                    stored_filename,
+                    len(chunks),
+                    1,
+                    now,
+                ),
+            )
         for chunk in chunks:
             conn.execute(
                 """INSERT INTO study_document_chunks
@@ -1950,6 +2012,10 @@ async def upload_document(
             )
         conn.execute("UPDATE study_subjects SET updated_at = ? WHERE id = ?", (now, subject_id))
 
+    for duplicate_storage_path in duplicate_storage_paths:
+        if duplicate_storage_path != storage_path:
+            _delete_document_storage(duplicate_storage_path)
+
     _debug(
         "document_upload_done",
         document_id=doc_id,
@@ -1960,6 +2026,8 @@ async def upload_document(
         chunk_count=len(chunks),
         vector_index_ready=True,
         storage_path=storage_path,
+        status=upload_status,
+        duplicate_cleanup_count=len(duplicate_docs),
     )
     return {
         "id": doc_id,
@@ -1971,6 +2039,9 @@ async def upload_document(
         "chunk_count": len(chunks),
         "vector_index_ready": True,
         "created_at": now,
+        "status": upload_status,
+        "replaced_existing": bool(existing_doc),
+        "duplicate_cleanup_count": len(duplicate_docs),
     }
 
 
@@ -2203,6 +2274,191 @@ async def list_quizzes(
                 for row in rows
             ]
         }
+
+
+@router.patch("/quizzes/{quiz_id}")
+async def rename_quiz(
+    quiz_id: str,
+    req: QuizRenameRequest,
+    current_user: UserInDB = Depends(get_current_user),
+):
+    title = req.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="题组名称不能为空")
+
+    with get_db() as conn:
+        quiz = conn.execute(
+            "SELECT id, subject_id, title FROM quiz_sets WHERE id = ? AND user_id = ?",
+            (quiz_id, current_user.id),
+        ).fetchone()
+        if not quiz:
+            raise HTTPException(status_code=404, detail="题目记录不存在")
+
+        _debug(
+            "quiz_rename_start",
+            quiz_id=quiz_id,
+            old_title=quiz["title"],
+            new_title=title,
+            user_id=current_user.id,
+        )
+        conn.execute(
+            "UPDATE quiz_sets SET title = ? WHERE id = ? AND user_id = ?",
+            (title, quiz_id, current_user.id),
+        )
+        conn.execute("UPDATE study_subjects SET updated_at = ? WHERE id = ?", (_now(), quiz["subject_id"]))
+        result = _serialize_quiz(conn, quiz_id)
+        _debug("quiz_rename_done", quiz_id=quiz_id, new_title=title)
+        return result
+
+
+@router.post("/quizzes/merge", status_code=status.HTTP_201_CREATED)
+async def merge_quizzes(
+    req: QuizMergeRequest,
+    current_user: UserInDB = Depends(get_current_user),
+):
+    quiz_ids: List[str] = []
+    seen_ids = set()
+    for quiz_id in req.quiz_ids:
+        clean_id = str(quiz_id).strip()
+        if clean_id and clean_id not in seen_ids:
+            quiz_ids.append(clean_id)
+            seen_ids.add(clean_id)
+
+    if len(quiz_ids) < 2:
+        raise HTTPException(status_code=400, detail="至少选择两个历史题组才能合并")
+    if len(quiz_ids) > 20:
+        raise HTTPException(status_code=400, detail="一次最多合并 20 个历史题组")
+
+    placeholders = ",".join("?" for _ in quiz_ids)
+    now = _now()
+
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""SELECT qs.*, ss.name AS subject_name
+                FROM quiz_sets qs
+                JOIN study_subjects ss ON ss.id = qs.subject_id
+                WHERE qs.user_id = ? AND qs.id IN ({placeholders})""",
+            [current_user.id, *quiz_ids],
+        ).fetchall()
+        if len(rows) != len(quiz_ids):
+            raise HTTPException(status_code=404, detail="部分题组不存在或无权访问")
+
+        by_id = {row["id"]: row for row in rows}
+        ordered_quizzes = [by_id[quiz_id] for quiz_id in quiz_ids]
+        subject_ids = {row["subject_id"] for row in ordered_quizzes}
+        if len(subject_ids) != 1:
+            raise HTTPException(status_code=400, detail="只能合并同一学科下的历史题组")
+
+        question_rows: List[Any] = []
+        for quiz in ordered_quizzes:
+            question_rows.extend(
+                conn.execute(
+                    "SELECT * FROM quiz_questions WHERE quiz_set_id = ? ORDER BY seq_no ASC",
+                    (quiz["id"],),
+                ).fetchall()
+            )
+        if not question_rows:
+            raise HTTPException(status_code=400, detail="所选题组没有可合并的题目")
+
+        def merge_sources(field_name: str) -> List[Dict[str, Any]]:
+            merged: List[Dict[str, Any]] = []
+            seen_sources = set()
+            for quiz in ordered_quizzes:
+                try:
+                    sources = json.loads(quiz[field_name] or "[]")
+                except Exception as exc:
+                    _debug_exception("quiz_merge_source_parse_error", exc, quiz_id=quiz["id"], field=field_name)
+                    sources = []
+                for source in sources:
+                    if not isinstance(source, dict):
+                        continue
+                    key = (
+                        source.get("url")
+                        or source.get("document_id")
+                        or f"{source.get('filename', '')}:{source.get('title', '')}"
+                        or json.dumps(source, ensure_ascii=False, sort_keys=True)
+                    )
+                    if key in seen_sources:
+                        continue
+                    seen_sources.add(key)
+                    merged.append(source)
+            return merged
+
+        new_quiz_id = str(uuid.uuid4())
+        subject_id = ordered_quizzes[0]["subject_id"]
+        subject_name = ordered_quizzes[0]["subject_name"]
+        title = req.title.strip() or ordered_quizzes[0]["title"] or f"{subject_name} - 合并练习"
+        topics = list(dict.fromkeys([row["topic"] for row in ordered_quizzes if row["topic"]]))
+        topic = " / ".join(topics)[:120] if topics else "合并练习"
+        question_types = {row["question_type"] for row in ordered_quizzes if row["question_type"]}
+        question_type = question_types.pop() if len(question_types) == 1 else "mixed"
+        difficulties = [row["difficulty"] for row in ordered_quizzes if row["difficulty"]]
+        difficulty = difficulties[0] if difficulties else "medium"
+        local_sources = merge_sources("local_sources")
+        web_sources = merge_sources("web_sources")
+
+        _debug(
+            "quiz_merge_start",
+            user_id=current_user.id,
+            quiz_ids=quiz_ids,
+            new_quiz_id=new_quiz_id,
+            title=title,
+            question_count=len(question_rows),
+        )
+        conn.execute(
+            """INSERT INTO quiz_sets
+               (id, user_id, subject_id, title, topic, question_type, count, difficulty,
+                local_sources, web_sources, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                new_quiz_id,
+                current_user.id,
+                subject_id,
+                title,
+                topic,
+                question_type,
+                len(question_rows),
+                difficulty,
+                json.dumps(local_sources, ensure_ascii=False),
+                json.dumps(web_sources, ensure_ascii=False),
+                now,
+            ),
+        )
+        for seq_no, question in enumerate(question_rows, start=1):
+            conn.execute(
+                """INSERT INTO quiz_questions
+                   (id, quiz_set_id, seq_no, question_type, prompt, options_json, answer_json,
+                    explanation, local_citation, web_citation)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(uuid.uuid4()),
+                    new_quiz_id,
+                    seq_no,
+                    question["question_type"],
+                    question["prompt"],
+                    question["options_json"],
+                    question["answer_json"],
+                    question["explanation"],
+                    question["local_citation"],
+                    question["web_citation"],
+                ),
+            )
+
+        conn.execute(f"DELETE FROM quiz_questions WHERE quiz_set_id IN ({placeholders})", quiz_ids)
+        conn.execute(
+            f"DELETE FROM quiz_sets WHERE user_id = ? AND id IN ({placeholders})",
+            [current_user.id, *quiz_ids],
+        )
+        conn.execute("UPDATE study_subjects SET updated_at = ? WHERE id = ?", (now, subject_id))
+
+        result = _serialize_quiz(conn, new_quiz_id)
+        _debug(
+            "quiz_merge_done",
+            new_quiz_id=new_quiz_id,
+            merged_from=quiz_ids,
+            question_count=len(result.get("questions", [])),
+        )
+        return result
 
 
 @router.get("/quizzes/{quiz_id}")
